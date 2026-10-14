@@ -1,0 +1,13 @@
+---
+# ansible-role-elastic-tls runs first in the same play: it publishes the
+# certificates it issued as elastic_tls_ssl_certificates, which this role reads.
+- name: Issue certificates and deploy Fleet Server
+  hosts: fleet_server
+  become: true
+  gather_facts: true
+  # Stop the whole run if any host fails validation, before anything is enrolled.
+  any_errors_fatal: true
+  # Do NOT set `serial` here - restarts and upgrades are batched by the role.
+  roles:
+    - role: elastic_tls
+    - role: elastic_fleet

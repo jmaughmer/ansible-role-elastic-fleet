@@ -1,0 +1,191 @@
+---
+# Fleet settings live in Kibana and are shared by every Fleet Server, so they
+# are managed once, from the first host of the play, through the Fleet API.
+# Each object is read first and only written when it differs.
+- name: Fleet | Manage Fleet settings through Kibana
+  run_once: true
+  module_defaults:
+    ansible.builtin.uri:
+      headers: "{{ _ef_kibana_headers }}"
+      url_username: "{{ elastic_fleet_kibana_username if _ef_kibana_basic_auth | bool else omit }}"
+      url_password: "{{ elastic_fleet_kibana_password if _ef_kibana_basic_auth | bool else omit }}"
+      force_basic_auth: "{{ _ef_kibana_basic_auth | bool }}"
+      ca_path: "{{ _ef_kibana_ca_file if _ef_has_kibana_ca | bool else omit }}"
+      validate_certs: true
+      timeout: "{{ elastic_fleet_api_timeout }}"
+      body_format: json
+  block:
+    # ---------------------------------------------------------------- Kibana
+    - name: Fleet | Read the Kibana version
+      ansible.builtin.uri:
+        url: "{{ _ef_kibana_url }}/api/status"
+        status_code: [200]
+      register: _ef_kibana_status
+      until: _ef_kibana_status is not failed
+      retries: "{{ elastic_fleet_task_retries }}"
+      delay: "{{ elastic_fleet_task_delay }}"
+      no_log: "{{ elastic_fleet_no_log }}"
+
+    - name: Fleet | Verify Kibana is not older than Fleet Server
+      vars:
+        _ef_kibana_version: "{{ _ef_kibana_status.json.version.number | default('0.0.0') }}"
+      ansible.builtin.assert:
+        that:
+          - >-
+            (_ef_kibana_version.split('.')[0:2] | join('.'))
+            is version(elastic_fleet_version.split('.')[0:2] | join('.'), '>=')
+        fail_msg: >-
+          Kibana {{ _ef_kibana_version }} is older than Fleet Server {{ elastic_fleet_version }}. Upgrade
+          Kibana first; Fleet Server must not be newer than Kibana or Elasticsearch.
+        quiet: true
+
+    # Idempotent: creates Fleet's system indices and default objects when needed.
+    - name: Fleet | Run Fleet setup
+      ansible.builtin.uri:
+        url: "{{ _ef_kibana_url }}/api/fleet/setup"
+        method: POST
+        status_code: [200]
+      register: _ef_fleet_setup
+      until: _ef_fleet_setup is not failed
+      retries: "{{ elastic_fleet_task_retries }}"
+      delay: "{{ elastic_fleet_task_delay }}"
+      changed_when: false
+      no_log: "{{ elastic_fleet_no_log }}"
+
+    # ----------------------------------------------------- Fleet Server policy
+    - name: Fleet | Look up the Fleet Server policy
+      ansible.builtin.uri:
+        url: "{{ _ef_kibana_url }}/api/fleet/agent_policies/{{ elastic_fleet_policy_id | urlencode }}"
+        status_code: [200, 404]
+      register: _ef_policy
+      until: _ef_policy.status | default(-1) in [200, 404]
+      retries: "{{ elastic_fleet_task_retries }}"
+      delay: "{{ elastic_fleet_task_delay }}"
+      no_log: "{{ elastic_fleet_no_log }}"
+
+    # has_fleet_server adds the Fleet Server integration to the new policy.
+    # An existing policy is left as it is: edit it in Fleet.
+    - name: Fleet | Create the Fleet Server policy
+      ansible.builtin.uri:
+        url: >-
+          {{ _ef_kibana_url }}/api/fleet/agent_policies?sys_monitoring={{
+             'true' if elastic_fleet_policy_system_monitoring | bool else 'false' }}
+        method: POST
+        body:
+          id: "{{ elastic_fleet_policy_id }}"
+          name: "{{ elastic_fleet_policy_name }}"
+          namespace: "{{ elastic_fleet_policy_namespace }}"
+          description: "{{ elastic_fleet_policy_description }}"
+          has_fleet_server: true
+          monitoring_enabled: "{{ elastic_fleet_policy_monitoring_enabled }}"
+        status_code: [200]
+      register: _ef_policy_created
+      changed_when: true
+      when: _ef_policy.status == 404
+      no_log: "{{ elastic_fleet_no_log }}"
+
+    # ------------------------------------------------------ Fleet Server hosts
+    - name: Fleet | Look up the Fleet Server host entry
+      ansible.builtin.uri:
+        url: "{{ _ef_kibana_url }}/api/fleet/fleet_server_hosts/{{ elastic_fleet_server_host_id | urlencode }}"
+        status_code: [200, 404]
+      register: _ef_fleet_host
+      until: _ef_fleet_host.status | default(-1) in [200, 404]
+      retries: "{{ elastic_fleet_task_retries }}"
+      delay: "{{ elastic_fleet_task_delay }}"
+      no_log: "{{ elastic_fleet_no_log }}"
+
+    - name: Fleet | Compare the Fleet Server host entry
+      ansible.builtin.set_fact:
+        _ef_fleet_host_current: "{{ _ef_fleet_host.json.item | default({}) }}"
+        _ef_fleet_host_desired:
+          name: "{{ elastic_fleet_server_host_name }}"
+          host_urls: "{{ elastic_fleet_public_urls }}"
+          is_default: "{{ elastic_fleet_server_host_is_default | bool }}"
+
+    - name: Fleet | Verify the Fleet Server host entry can be changed
+      ansible.builtin.assert:
+        that:
+          - not (_ef_fleet_host_current.is_preconfigured | default(false) | bool)
+            or (_ef_fleet_host_current.host_urls | default([]) | sort) == (elastic_fleet_public_urls | sort)
+        fail_msg: >-
+          Fleet Server host '{{ elastic_fleet_server_host_id }}' is preconfigured in kibana.yml
+          (xpack.fleet.fleetServerHosts) with {{ _ef_fleet_host_current.host_urls | default([]) }}, so the API
+          cannot change it to {{ elastic_fleet_public_urls }}. Change it in kibana.yml, or set
+          elastic_fleet_public_urls to match.
+        quiet: true
+
+    - name: Fleet | Register the Fleet Server host entry
+      ansible.builtin.uri:
+        url: >-
+          {{ _ef_kibana_url }}/api/fleet/fleet_server_hosts{{
+             ('/' ~ (elastic_fleet_server_host_id | urlencode)) if _ef_fleet_host.status == 200 else '' }}
+        method: "{{ 'PUT' if _ef_fleet_host.status == 200 else 'POST' }}"
+        body: >-
+          {{ _ef_fleet_host_desired
+             | combine({'id': elastic_fleet_server_host_id} if _ef_fleet_host.status == 404 else {}) }}
+        status_code: [200]
+      changed_when: true
+      when: >-
+        _ef_fleet_host.status == 404
+        or (_ef_fleet_host_current.name | default('')) != _ef_fleet_host_desired.name
+        or (_ef_fleet_host_current.host_urls | default([]) | sort) != (_ef_fleet_host_desired.host_urls | sort)
+        or (_ef_fleet_host_current.is_default | default(false) | bool) != _ef_fleet_host_desired.is_default
+      no_log: "{{ elastic_fleet_no_log }}"
+
+    # ------------------------------------------------- Elasticsearch output
+    - name: Fleet | Manage the Elasticsearch output
+      when: elastic_fleet_manage_output | bool
+      block:
+        - name: Fleet | Read the Elasticsearch CA certificate
+          ansible.builtin.slurp:
+            src: "{{ _ef_es_ca_file }}"
+          register: _ef_output_ca
+
+        - name: Fleet | Look up the Elasticsearch output
+          ansible.builtin.uri:
+            url: "{{ _ef_kibana_url }}/api/fleet/outputs/{{ elastic_fleet_output_id | urlencode }}"
+            status_code: [200, 404]
+          register: _ef_output
+          until: _ef_output.status | default(-1) in [200, 404]
+          retries: "{{ elastic_fleet_task_retries }}"
+          delay: "{{ elastic_fleet_task_delay }}"
+          no_log: "{{ elastic_fleet_no_log }}"
+
+        - name: Fleet | Compare the Elasticsearch output
+          ansible.builtin.set_fact:
+            _ef_output_current: "{{ _ef_output.json.item | default({}) }}"
+            _ef_output_desired:
+              name: "{{ elastic_fleet_output_name }}"
+              type: elasticsearch
+              hosts: "{{ elastic_fleet_output_hosts }}"
+              ssl:
+                certificate_authorities: ["{{ _ef_output_ca.content | b64decode | trim }}"]
+
+        - name: Fleet | Verify the Elasticsearch output can be changed
+          ansible.builtin.assert:
+            that:
+              - not (_ef_output_current.is_preconfigured | default(false) | bool)
+            fail_msg: >-
+              Output '{{ elastic_fleet_output_id }}' is preconfigured in kibana.yml (xpack.fleet.outputs), so the
+              API cannot change it. Manage it there and set elastic_fleet_manage_output: false.
+            quiet: true
+
+        - name: Fleet | Update the Elasticsearch output
+          ansible.builtin.uri:
+            url: >-
+              {{ _ef_kibana_url }}/api/fleet/outputs{{
+                 ('/' ~ (elastic_fleet_output_id | urlencode)) if _ef_output.status == 200 else '' }}
+            method: "{{ 'PUT' if _ef_output.status == 200 else 'POST' }}"
+            body: >-
+              {{ _ef_output_desired
+                 | combine({'id': elastic_fleet_output_id, 'is_default': true, 'is_default_monitoring': true}
+                           if _ef_output.status == 404 else {}) }}
+            status_code: [200]
+          changed_when: true
+          when: >-
+            _ef_output.status == 404
+            or (_ef_output_current.hosts | default([]) | sort) != (_ef_output_desired.hosts | sort)
+            or (_ef_output_current.ssl.certificate_authorities | default([]) | map('trim') | list)
+               != _ef_output_desired.ssl.certificate_authorities
+          no_log: "{{ elastic_fleet_no_log }}"

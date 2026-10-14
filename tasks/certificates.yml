@@ -1,0 +1,170 @@
+---
+# Elastic Agent installed from the RPM runs as root, so everything here is
+# root-only. Fleet Server reads these files by path; the paths are part of the
+# enrollment, the contents are not, so a renewed certificate only needs a restart.
+- name: Certificates | Create TLS directory
+  ansible.builtin.file:
+    path: "{{ elastic_fleet_ssl_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+
+# Entries carry either inline content or the path of a file already on the host,
+# such as a certificate issued by ansible-role-elastic-tls.
+- name: Certificates | Install Elasticsearch CA certificate
+  ansible.builtin.copy:
+    content: "{{ _ef_es_ca_content if (_ef_es_ca_content | length) > 0 else omit }}"
+    src: "{{ _ef_es_ca_path if (_ef_es_ca_path | length) > 0 else omit }}"
+    remote_src: "{{ (_ef_es_ca_path | length) > 0 }}"
+    dest: "{{ _ef_es_ca_file }}"
+    owner: root
+    group: root
+    mode: "0644"
+  register: _ef_tls_es_ca
+
+- name: Certificates | Install Kibana CA certificate
+  ansible.builtin.copy:
+    content: "{{ _ef_kibana_ca_content if (_ef_kibana_ca_content | length) > 0 else omit }}"
+    src: "{{ _ef_kibana_ca_path if (_ef_kibana_ca_path | length) > 0 else omit }}"
+    remote_src: "{{ (_ef_kibana_ca_path | length) > 0 }}"
+    dest: "{{ _ef_kibana_ca_file }}"
+    owner: root
+    group: root
+    mode: "0644"
+  when:
+    - elastic_fleet_manage_fleet_settings | bool
+    - _ef_has_kibana_ca | bool
+
+- name: Certificates | Install server certificate
+  ansible.builtin.copy:
+    content: "{{ _ef_ssl_entry.certificate.content | default(omit) }}"
+    src: "{{ omit if _ef_ssl_entry.certificate.content is defined else _ef_ssl_entry.certificate.path }}"
+    remote_src: "{{ _ef_ssl_entry.certificate.content is not defined }}"
+    dest: "{{ _ef_server_cert_file }}"
+    owner: root
+    group: root
+    mode: "0644"
+  register: _ef_tls_cert
+
+- name: Certificates | Install server private key
+  ansible.builtin.copy:
+    content: "{{ _ef_ssl_entry.key.content | default(omit) }}"
+    src: "{{ omit if _ef_ssl_entry.key.content is defined else _ef_ssl_entry.key.path }}"
+    remote_src: "{{ _ef_ssl_entry.key.content is not defined }}"
+    dest: "{{ _ef_server_key_file }}"
+    owner: root
+    group: root
+    mode: "0600"
+  register: _ef_tls_key
+  no_log: "{{ elastic_fleet_no_log }}"
+  diff: false
+
+# enroll takes the passphrase of an encrypted key as a file.
+- name: Certificates | Install server private key passphrase
+  ansible.builtin.copy:
+    content: "{{ _ef_ssl_key_passphrase }}"
+    dest: "{{ _ef_server_key_passphrase_file }}"
+    owner: root
+    group: root
+    mode: "0600"
+  when: (_ef_ssl_key_passphrase | length) > 0
+  no_log: "{{ elastic_fleet_no_log }}"
+  diff: false
+
+- name: Certificates | Remove an unused private key passphrase
+  ansible.builtin.file:
+    path: "{{ _ef_server_key_passphrase_file }}"
+    state: absent
+  when: (_ef_ssl_key_passphrase | length) == 0
+
+- name: Certificates | Install server CA certificate
+  ansible.builtin.copy:
+    content: "{{ _ef_server_ca_content if (_ef_server_ca_content | length) > 0 else omit }}"
+    src: "{{ _ef_server_ca_path if (_ef_server_ca_path | length) > 0 else omit }}"
+    remote_src: "{{ (_ef_server_ca_path | length) > 0 }}"
+    dest: "{{ _ef_server_ca_file }}"
+    owner: root
+    group: root
+    mode: "0644"
+  register: _ef_tls_ca
+  when: _ef_has_server_ca | bool
+
+# Passed to enroll as a file so the token never appears on a command line.
+# Changing it changes the enrollment fingerprint, which re-enrolls the host.
+- name: Certificates | Install the Fleet Server service token
+  ansible.builtin.copy:
+    content: "{{ elastic_fleet_service_token }}"
+    dest: "{{ _ef_service_token_file }}"
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: "{{ elastic_fleet_no_log }}"
+  diff: false
+
+- name: Certificates | Verify private key matches certificate
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      cert_pub=$(openssl x509 -in "$FS_CERT" -noout -pubkey | openssl pkey -pubin -outform DER | sha256sum)
+      key_pub=$(openssl pkey -in "$FS_KEY" -passin env:FS_KEY_PASSPHRASE -pubout -outform DER | sha256sum)
+      [ "$cert_pub" = "$key_pub" ]
+    executable: /bin/bash
+  environment:
+    FS_CERT: "{{ _ef_server_cert_file }}"
+    FS_KEY: "{{ _ef_server_key_file }}"
+    FS_KEY_PASSPHRASE: "{{ _ef_ssl_key_passphrase }}"
+  changed_when: false
+  check_mode: false
+  no_log: "{{ elastic_fleet_no_log }}"
+
+- name: Certificates | Verify certificate chains to the CA
+  ansible.builtin.command:
+    argv: [openssl, verify, -CAfile, "{{ _ef_server_ca_file }}", -untrusted, "{{ _ef_server_cert_file }}", "{{ _ef_server_cert_file }}"]
+  changed_when: false
+  check_mode: false
+  when: _ef_has_server_ca | bool
+
+# Agents connect using these names, so a certificate without them fails every
+# agent's TLS verification even though Fleet Server itself starts fine.
+- name: Certificates | Read the server certificate names
+  ansible.builtin.command:
+    argv: [openssl, x509, -in, "{{ _ef_server_cert_file }}", -noout, -ext, subjectAltName]
+  register: _ef_cert_san
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Certificates | Warn about Fleet Server URLs missing from the certificate
+  vars:
+    _ef_cert_names: >-
+      {{ (_ef_cert_san.stdout | default('') | regex_findall('DNS:([^,\s]+)'))
+         + (_ef_cert_san.stdout | default('') | regex_findall('IP Address:([^,\s]+)')) }}
+    _ef_url_hosts: "{{ ([elastic_fleet_url] + elastic_fleet_public_urls) | map('urlsplit', 'hostname') | unique | list }}"
+    # A wildcard covers exactly one label: *.example.com covers fleet.example.com.
+    _ef_missing: >-
+      {%- set ns = namespace(missing=[]) -%}
+      {%- for h in _ef_url_hosts -%}
+        {%- set ns.ok = h in _ef_cert_names -%}
+        {%- for n in _ef_cert_names if n.startswith('*.') -%}
+          {%- if h.endswith(n[1:]) and '.' not in h[:(h | length) - (n | length) + 1] -%}
+            {%- set ns.ok = true -%}
+          {%- endif -%}
+        {%- endfor -%}
+        {%- if not ns.ok -%}{%- set ns.missing = ns.missing + [h] -%}{%- endif -%}
+      {%- endfor -%}
+      {{ ns.missing }}
+  ansible.builtin.debug:
+    msg: >-
+      The Fleet Server certificate on {{ inventory_hostname }} does not name {{ _ef_missing | join(', ') }}
+      (SANs: {{ _ef_cert_names | join(', ') }}). Agents connecting to those names will reject it. Add them
+      as SANs, for example in elastic_tls_certificates.
+  when:
+    - _ef_cert_san.rc | default(1) == 0
+    - _ef_missing | length > 0
+
+- name: Certificates | Flag restart for certificate changes
+  ansible.builtin.set_fact:
+    _ef_restart_required: true
+  when: >-
+    _ef_tls_es_ca is changed or _ef_tls_cert is changed or _ef_tls_key is changed or _ef_tls_ca is changed

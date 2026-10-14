@@ -1,0 +1,21 @@
+---
+# Waits until Fleet Server on _ef_wait_host reports HEALTHY on /api/status.
+# Inputs:
+#   _ef_wait_host     host to check (the request is delegated to it)
+#
+# Fleet Server answers 503 while it starts or is unhealthy, and the port is
+# closed until the agent has started the component at all.
+- name: "Ready | Wait for Fleet Server on {{ _ef_wait_host }}"
+  ansible.builtin.uri:
+    url: "{{ hostvars[_ef_wait_host]._ef_status_url_fact }}"
+    # Installed from inline content or from a path on the host (as
+    # ansible-role-elastic-tls provides it); either way it ends up in this file.
+    ca_path: "{{ _ef_server_ca_file if hostvars[_ef_wait_host]._ef_has_server_ca_fact | bool else omit }}"
+    validate_certs: true
+    timeout: "{{ elastic_fleet_api_timeout }}"
+    status_code: [200, 503]
+  delegate_to: "{{ _ef_wait_host }}"
+  register: _ef_ready
+  until: (_ef_ready.json.status | default('')) == 'HEALTHY'
+  retries: "{{ elastic_fleet_ready_retries }}"
+  delay: "{{ elastic_fleet_ready_delay }}"

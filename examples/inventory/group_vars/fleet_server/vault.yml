@@ -1,0 +1,14 @@
+---
+# EXAMPLE ONLY - replace the values and encrypt this file:
+#   ansible-vault encrypt inventory/group_vars/fleet_server/vault.yml
+#
+# Service account token for elastic/fleet-server, created once with an admin user:
+#   curl -u elastic --cacert ca.crt -X POST \
+#     "https://es-data-1.example.com:9200/_security/service/elastic/fleet-server/credential/token/fleet-prod"
+# Use the "token.value" from the response.
+vault_elastic_fleet_service_token: "CHANGE-ME-service-account-token"
+
+# API key of a user allowed to manage Fleet (the "encoded" value), created with:
+#   POST /_security/api_key  {"name": "ansible-fleet-server"}
+# using a user with the Fleet and Integrations "All" Kibana privileges.
+vault_elastic_fleet_kibana_api_key: "CHANGE-ME-encoded-api-key"

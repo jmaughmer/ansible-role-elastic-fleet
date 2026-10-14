@@ -1,0 +1,4 @@
+---
+# Encrypt this file: ansible-vault encrypt inventory/group_vars/all/vault.yml
+# The passphrase protects the private CA key on the control node.
+vault_elastic_tls_ca_passphrase: REPLACE-WITH-A-LONG-RANDOM-PASSPHRASE

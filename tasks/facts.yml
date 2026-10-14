@@ -1,0 +1,53 @@
+---
+- name: Facts | Gather minimal system facts
+  ansible.builtin.setup:
+    gather_subset: [min]
+  register: _ef_setup
+  until: _ef_setup is not failed
+  retries: "{{ elastic_fleet_task_retries }}"
+  delay: "{{ elastic_fleet_task_delay }}"
+  when: ansible_facts['os_family'] is not defined
+
+- name: Facts | Query installed Elastic Agent package version  # noqa: command-instead-of-module
+  ansible.builtin.command:
+    cmd: rpm -q --queryformat '%{VERSION}' elastic-agent
+  register: _ef_rpm_query
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Facts | Query Elastic Agent service state  # noqa: command-instead-of-module
+  ansible.builtin.command:
+    cmd: systemctl is-active elastic-agent
+  register: _ef_service_state
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Facts | Check for an existing Fleet enrollment
+  ansible.builtin.stat:
+    path: "{{ _ef_fleet_enc_file }}"
+  register: _ef_fleet_enc
+
+- name: Facts | Read the recorded enrollment state
+  ansible.builtin.slurp:
+    src: "{{ _ef_state_file }}"
+  register: _ef_state_raw
+  failed_when: false
+
+- name: Facts | Set Fleet Server facts
+  ansible.builtin.set_fact:
+    _ef_installed_version: "{{ (_ef_rpm_query.stdout | trim) if _ef_rpm_query.rc == 0 else '' }}"
+    _ef_is_running: "{{ (_ef_service_state.stdout | trim) == 'active' }}"
+    _ef_target_version: "{{ elastic_fleet_version }}"
+    _ef_status_url_fact: "{{ _ef_status_url }}"
+    _ef_state: >-
+      {{ (_ef_state_raw.content | b64decode | from_json) if _ef_state_raw.content is defined else {} }}
+    _ef_restart_required: false
+
+# Enrolled by this role: Fleet's own state file exists and the role recorded
+# the settings it enrolled with. Anything else is enrolled from scratch.
+- name: Facts | Derive version and enrollment facts
+  ansible.builtin.set_fact:
+    _ef_version_changing: "{{ (_ef_installed_version | length) > 0 and _ef_installed_version != elastic_fleet_version }}"
+    _ef_is_enrolled: "{{ _ef_fleet_enc.stat.exists and (_ef_state.fingerprint | default('') | length) > 0 }}"

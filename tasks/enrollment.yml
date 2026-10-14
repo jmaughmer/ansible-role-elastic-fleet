@@ -1,0 +1,60 @@
+---
+# elastic-agent cannot report the settings it was enrolled with, so the role
+# records a salted SHA-256 of them (arguments, service token, key passphrase)
+# in a root-only state file, and re-enrolls when they change.
+
+- name: Enrollment | Choose fingerprint salt
+  ansible.builtin.set_fact:
+    _ef_state_salt: >-
+      {{ _ef_state.salt | default(lookup('ansible.builtin.password', '/dev/null',
+                                         chars=['ascii_letters', 'digits'], length=32)) }}
+
+- name: Enrollment | Work out the enrollment for this host
+  ansible.builtin.set_fact:
+    # Published so the batch running on the first host can enroll this one.
+    _ef_enroll_argv_fact: "{{ _ef_enroll_argv }}"
+    _ef_has_server_ca_fact: "{{ _ef_has_server_ca | bool }}"
+    _ef_state_desired:
+      salt: "{{ _ef_state_salt }}"
+      fingerprint: >-
+        {{ (_ef_state_salt ~ '\n' ~ (_ef_enroll_argv | join('\n')) ~ '\n'
+            ~ elastic_fleet_service_token ~ '\n' ~ _ef_ssl_key_passphrase) | hash('sha256') }}
+  no_log: "{{ elastic_fleet_no_log }}"
+
+- name: Enrollment | Decide what this host needs
+  ansible.builtin.set_fact:
+    _ef_reenroll_required: >-
+      {{ (_ef_is_enrolled | bool) and (_ef_state.fingerprint | default('')) != _ef_state_desired.fingerprint }}
+
+# Hosts already serving are handled in batches by rolling_restart.yml: version
+# changes always, re-enrollment and restarts when allowed.
+- name: Enrollment | Plan rolling changes
+  ansible.builtin.set_fact:
+    _ef_rolling_reenroll: "{{ (_ef_reenroll_required | bool) and (elastic_fleet_reenroll_on_change | bool) }}"
+    _ef_needs_rolling: >-
+      {{ (_ef_is_enrolled | bool)
+         and ((_ef_version_changing | bool)
+              or (elastic_fleet_force_restart | bool)
+              or ((_ef_reenroll_required | bool) and (elastic_fleet_reenroll_on_change | bool))
+              or ((_ef_restart_required | bool) and (elastic_fleet_restart_on_change | bool))) }}
+
+- name: Enrollment | Report a re-enrollment that was skipped
+  ansible.builtin.debug:
+    msg: >-
+      The enrollment settings of {{ inventory_hostname }} changed (URLs, policy, certificate paths or
+      service token), but elastic_fleet_reenroll_on_change is false, so it keeps running with the old ones.
+      Re-run with -e elastic_fleet_reenroll_on_change=true to re-enroll it.
+  when:
+    - _ef_reenroll_required | bool
+    - not (elastic_fleet_reenroll_on_change | bool)
+
+- name: Enrollment | Report a restart that was skipped
+  ansible.builtin.debug:
+    msg: >-
+      {{ inventory_hostname }} has certificate changes that need a restart, but
+      elastic_fleet_restart_on_change is false. Restart elastic-agent manually or re-run with
+      -e elastic_fleet_force_restart=true.
+  when:
+    - _ef_is_enrolled | bool
+    - _ef_restart_required | bool
+    - not (elastic_fleet_restart_on_change | bool)

@@ -1,0 +1,57 @@
+---
+# Phase 1 - every host in parallel. Nothing restarts a running Fleet Server
+# here; changes that need one are recorded and acted on in phase 2.
+- name: Gather Fleet Server state
+  ansible.builtin.import_tasks: facts.yml
+  tags: [elastic_fleet, always]
+
+- name: Preflight checks
+  ansible.builtin.import_tasks: preflight.yml
+  tags: [elastic_fleet, always]
+
+- name: Configure package repository
+  ansible.builtin.import_tasks: repository.yml
+  when: elastic_fleet_repo_source != 'none'
+  tags: [elastic_fleet, elastic_fleet_install]
+
+- name: Install Elastic Agent
+  ansible.builtin.import_tasks: install.yml
+  tags: [elastic_fleet, elastic_fleet_install]
+
+- name: Configure the firewall
+  ansible.builtin.import_tasks: firewall.yml
+  when: elastic_fleet_manage_firewall | bool
+  tags: [elastic_fleet, elastic_fleet_system]
+
+- name: Install TLS certificates and the service token
+  ansible.builtin.import_tasks: certificates.yml
+  tags: [elastic_fleet, elastic_fleet_tls]
+
+# Runs before enrolling so a bad token or CA never reaches the agent.
+- name: Check Elasticsearch connectivity, service token and version
+  ansible.builtin.import_tasks: elasticsearch_check.yml
+  when: elastic_fleet_elasticsearch_check | bool
+  tags: [elastic_fleet, elastic_fleet_enroll]
+
+- name: Manage Fleet settings in Kibana
+  ansible.builtin.import_tasks: fleet_settings.yml
+  when: elastic_fleet_manage_fleet_settings | bool
+  tags: [elastic_fleet, elastic_fleet_settings]
+
+- name: Work out what each host needs
+  ansible.builtin.import_tasks: enrollment.yml
+  tags: [elastic_fleet, elastic_fleet_enroll, elastic_fleet_service]
+
+# Phase 2 - hosts not yet serving are enrolled and started in parallel; hosts
+# already serving are upgraded, re-enrolled or restarted in batches.
+- name: Enroll and start new Fleet Servers
+  ansible.builtin.import_tasks: service.yml
+  tags: [elastic_fleet, elastic_fleet_service]
+
+- name: Rolling changes
+  ansible.builtin.include_tasks:
+    file: rolling_restart.yml
+    apply:
+      tags: [elastic_fleet, elastic_fleet_service]
+  when: inventory_hostname == ansible_play_hosts | first
+  tags: [elastic_fleet, elastic_fleet_service]

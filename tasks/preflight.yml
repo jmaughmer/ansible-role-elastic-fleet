@@ -1,0 +1,159 @@
+---
+- name: Preflight | Verify operating system is supported
+  ansible.builtin.assert:
+    that:
+      - elastic_fleet_supported_distributions is sequence
+      - elastic_fleet_supported_distributions is not string
+      - ansible_facts['os_family'] == 'RedHat'
+      - ansible_facts['distribution'] in elastic_fleet_supported_distributions
+      - ansible_facts['distribution_major_version'] in ['9', '10']
+    fail_msg: >-
+      Unsupported platform {{ ansible_facts['distribution'] }}
+      {{ ansible_facts['distribution_version'] }}. Supported: major version 9 or 10 of
+      {{ elastic_fleet_supported_distributions | join(', ') }} (elastic_fleet_supported_distributions).
+    quiet: true
+
+- name: Preflight | Verify the play is not serialized
+  ansible.builtin.assert:
+    that:
+      - ansible_play_hosts | difference(ansible_play_batch) | length == 0
+    fail_msg: >-
+      Do not use `serial` on plays that apply this role; restarts and upgrades are batched by the
+      role (elastic_fleet_restart_batch_size).
+    quiet: true
+  run_once: true
+
+- name: Preflight | Verify host is a member of the Fleet Server group
+  ansible.builtin.assert:
+    that:
+      - inventory_hostname in (groups[elastic_fleet_group] | default([]))
+    fail_msg: "{{ inventory_hostname }} is not in inventory group '{{ elastic_fleet_group }}'."
+    quiet: true
+
+- name: Preflight | Verify Elastic Agent version
+  ansible.builtin.assert:
+    that:
+      - elastic_fleet_version is match('^9[.][0-9]+[.][0-9]+$')
+      - _ef_installed_version == '' or _ef_installed_version is version(elastic_fleet_version, '<=')
+      - _ef_installed_version == '' or _ef_installed_version.split('.')[0] == _ef_major_version
+    fail_msg: >-
+      elastic_fleet_version must be an exact 9.x.y release; downgrades and major upgrades are not
+      supported (installed: '{{ _ef_installed_version }}', requested: '{{ elastic_fleet_version }}').
+    quiet: true
+
+- name: Preflight | Verify package source settings
+  ansible.builtin.assert:
+    that:
+      - elastic_fleet_repo_source in ['elastic', 'satellite', 'none']
+      - elastic_fleet_repo_source != 'satellite' or elastic_fleet_satellite_repo_id | length > 0
+      - elastic_fleet_satellite_repo_state in ['unmanaged', 'enabled', 'disabled']
+      - elastic_fleet_satellite_repo_overrides is mapping
+      - elastic_fleet_satellite_repo_overrides.keys() | map('lower') | intersect(['enabled', 'baseurl', 'name']) | length == 0
+    fail_msg: >-
+      elastic_fleet_repo_source must be elastic, satellite or none. Satellite needs
+      elastic_fleet_satellite_repo_id; elastic_fleet_satellite_repo_state must be unmanaged, enabled or
+      disabled; and elastic_fleet_satellite_repo_overrides cannot set enabled, baseurl or name.
+    quiet: true
+
+- name: Preflight | Verify Fleet Server settings
+  ansible.builtin.assert:
+    that:
+      - elastic_fleet_url is match('^https://[^/]+')
+      - elastic_fleet_public_urls is sequence and elastic_fleet_public_urls is not string
+      - elastic_fleet_public_urls | length > 0
+      - elastic_fleet_public_urls | reject('match', '^https://[^/]+') | list | length == 0
+      - elastic_fleet_policy_id | length > 0
+      - elastic_fleet_client_auth in _ef_valid_client_auth
+      - elastic_fleet_enroll_extra_args is sequence and elastic_fleet_enroll_extra_args is not string
+      - elastic_fleet_policy_monitoring_enabled is sequence and elastic_fleet_policy_monitoring_enabled is not string
+      - elastic_fleet_policy_monitoring_enabled | difference(['logs', 'metrics']) | length == 0
+      - elastic_fleet_restart_batch_size | int >= 1
+      - (elastic_fleet_port | int) > 0 and (elastic_fleet_port | int) < 65536
+    fail_msg: >-
+      elastic_fleet_url and every elastic_fleet_public_urls entry must be https:// URLs,
+      elastic_fleet_policy_id is required, elastic_fleet_client_auth must be one of
+      {{ _ef_valid_client_auth | join(', ') }}, elastic_fleet_enroll_extra_args a list,
+      elastic_fleet_policy_monitoring_enabled a subset of [logs, metrics], elastic_fleet_port a valid
+      port and elastic_fleet_restart_batch_size at least 1.
+    quiet: true
+
+- name: Preflight | Verify Elasticsearch settings
+  ansible.builtin.assert:
+    that:
+      - elastic_fleet_elasticsearch_hosts | length > 0
+      - elastic_fleet_elasticsearch_url is match('^https://[^/]+')
+      - elastic_fleet_service_token | length > 0
+    fail_msg: >-
+      elastic_fleet_elasticsearch_hosts must not be empty (group '{{ elastic_fleet_elasticsearch_group }}'),
+      elastic_fleet_elasticsearch_url must be an https:// URL, and elastic_fleet_service_token (a token for
+      the elastic/fleet-server service account, vaulted) is required.
+    quiet: true
+  no_log: "{{ elastic_fleet_no_log }}"
+
+- name: Preflight | Verify Kibana settings
+  ansible.builtin.assert:
+    that:
+      - elastic_fleet_kibana_url is match('^https?://[^/]+')
+      - >-
+        (elastic_fleet_kibana_api_key | length) > 0
+        or ((elastic_fleet_kibana_username | length) > 0 and (elastic_fleet_kibana_password | length) > 0)
+      - not (elastic_fleet_manage_output | bool) or (elastic_fleet_output_hosts | length) > 0
+    fail_msg: >-
+      elastic_fleet_manage_fleet_settings needs elastic_fleet_kibana_url and credentials of a user allowed
+      to manage Fleet: elastic_fleet_kibana_api_key, or elastic_fleet_kibana_username and
+      elastic_fleet_kibana_password. Set elastic_fleet_manage_fleet_settings: false when Fleet is configured
+      elsewhere. elastic_fleet_manage_output also needs elastic_fleet_output_hosts.
+    quiet: true
+  when: elastic_fleet_manage_fleet_settings | bool
+  no_log: "{{ elastic_fleet_no_log }}"
+
+# Fleet settings are managed once per run, from the first host, so every host
+# in the play has to agree on them.
+- name: Preflight | Record the Fleet settings this host expects
+  ansible.builtin.set_fact:
+    _ef_fleet_settings_fact:
+      policy_id: "{{ elastic_fleet_policy_id }}"
+      public_urls: "{{ elastic_fleet_public_urls }}"
+
+- name: Preflight | Verify every Fleet Server expects the same Fleet settings
+  ansible.builtin.assert:
+    that:
+      - ansible_play_hosts | map('extract', hostvars, '_ef_fleet_settings_fact') | unique | list | length == 1
+    fail_msg: >-
+      Fleet Servers in this play disagree on elastic_fleet_policy_id or elastic_fleet_public_urls. Set them
+      once for the group, or apply the role in separate plays for separate policies.
+    quiet: true
+  run_once: true
+
+# The traditional encrypted PEM format derives its key with MD5, which a host
+# running in FIPS mode cannot use.
+- name: Preflight | Verify the private key can be read in FIPS mode
+  ansible.builtin.assert:
+    that:
+      - >-
+        _ef_ssl_entry.key.content is not defined
+        or _ef_ssl_entry.key.content is not search('Proc-Type: 4,ENCRYPTED')
+    fail_msg: >-
+      The private key for '{{ elastic_fleet_ssl_certificate_name }}' is in the traditional encrypted PEM
+      format (Proc-Type: 4,ENCRYPTED), whose key derivation uses MD5, and this host runs in FIPS
+      mode. Convert it first: openssl pkcs8 -topk8 -in old.key -out new.key
+    quiet: true
+  when: ansible_facts['fips'] | default(false) | bool
+  no_log: "{{ elastic_fleet_no_log }}"
+
+- name: Preflight | Verify TLS material
+  ansible.builtin.assert:
+    that:
+      - _ef_ssl_entry.certificate.content is defined or _ef_ssl_entry.certificate.path is defined
+      - _ef_ssl_entry.key.content is defined or _ef_ssl_entry.key.path is defined
+      - (_ef_es_ca_content | length) > 0 or (_ef_es_ca_path | length) > 0
+      - >-
+        not (elastic_fleet_manage_fleet_settings | bool) or (_ef_has_kibana_ca | bool)
+        or elastic_fleet_kibana_url is match('^http://')
+    fail_msg: >-
+      Fleet Server needs the entry '{{ elastic_fleet_ssl_certificate_name }}' in ssl_certificates or
+      elastic_tls_ssl_certificates with a certificate and a key (content, or a path on the host), and a CA
+      for Elasticsearch (elastic_fleet_elasticsearch_ca_certificate[_path], elastic_fleet_ssl_ca_certificate[_path]
+      or the entry's ca). Managing Fleet settings over https also needs a CA for Kibana.
+    quiet: true
+  no_log: "{{ elastic_fleet_no_log }}"

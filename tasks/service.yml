@@ -1,0 +1,30 @@
+---
+- name: Service | Enable Elastic Agent service
+  ansible.builtin.systemd_service:
+    name: elastic-agent
+    enabled: true
+
+# Hosts that are not serving yet are enrolled in parallel: there is nothing
+# to keep available.
+- name: Service | Enroll new Fleet Servers
+  ansible.builtin.include_tasks: enroll_host.yml
+  vars:
+    _ef_target: "{{ inventory_hostname }}"
+  when: not (_ef_is_enrolled | bool)
+
+# Enrolled but stopped, with nothing else to change: just start it.
+- name: Service | Start Fleet Servers that are not running
+  ansible.builtin.systemd_service:
+    name: elastic-agent
+    state: started
+  register: _ef_service_started
+  when:
+    - _ef_is_enrolled | bool
+    - not (_ef_is_running | bool)
+    - not (_ef_needs_rolling | bool)
+
+- name: Service | Wait for started Fleet Servers  # noqa: no-handler
+  ansible.builtin.include_tasks: wait_ready.yml
+  vars:
+    _ef_wait_host: "{{ inventory_hostname }}"
+  when: _ef_service_started is changed

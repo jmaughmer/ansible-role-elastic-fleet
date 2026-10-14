@@ -1,0 +1,60 @@
+---
+- name: "Rolling | Batch: {{ _ef_batch | join(', ') }}"
+  vars:
+    _ef_batch_upgrade: "{{ _ef_batch | map('extract', hostvars) | selectattr('_ef_version_changing') | map(attribute='inventory_hostname') | list }}"
+    _ef_batch_reenroll: "{{ _ef_batch | map('extract', hostvars) | selectattr('_ef_rolling_reenroll') | map(attribute='inventory_hostname') | list }}"
+    _ef_batch_restart: "{{ _ef_batch | difference(_ef_batch_reenroll) }}"
+  block:
+    # Fleet cannot upgrade an agent installed from an RPM, so upgrades go
+    # through the package manager here.
+    - name: Rolling | Upgrade Elastic Agent package
+      ansible.builtin.dnf:
+        name: "elastic-agent-{{ hostvars[item]._ef_target_version }}"
+        state: present
+        allow_downgrade: false
+        lock_timeout: "{{ elastic_fleet_dnf_lock_timeout }}"
+        enablerepo: "{{ _ef_package_repos if _ef_package_repos | length > 0 else omit }}"
+      delegate_to: "{{ item }}"
+      loop: "{{ _ef_batch_upgrade }}"
+      async: "{{ 0 if ansible_check_mode else elastic_fleet_download_async_timeout }}"
+      poll: "{{ elastic_fleet_download_async_poll }}"
+      register: _ef_upgrade_package
+      until: _ef_upgrade_package is not failed
+      retries: "{{ elastic_fleet_task_retries }}"
+      delay: "{{ elastic_fleet_task_delay }}"
+
+    # enroll restarts a running agent itself, and waits for it.
+    - name: Rolling | Re-enroll Fleet Servers whose enrollment settings changed
+      ansible.builtin.include_tasks: enroll_host.yml
+      loop: "{{ _ef_batch_reenroll }}"
+      loop_control:
+        loop_var: _ef_target
+
+    - name: Rolling | Restart Elastic Agent
+      ansible.builtin.systemd_service:
+        name: elastic-agent
+        state: restarted
+        daemon_reload: true
+      delegate_to: "{{ item }}"
+      loop: "{{ _ef_batch_restart }}"
+
+    - name: Rolling | Wait for restarted Fleet Servers
+      ansible.builtin.include_tasks: wait_ready.yml
+      loop: "{{ _ef_batch_restart }}"
+      loop_control:
+        loop_var: _ef_wait_host
+
+    - name: Rolling | Pause before next batch
+      ansible.builtin.pause:
+        seconds: "{{ elastic_fleet_restart_pause_seconds }}"
+      when:
+        - elastic_fleet_restart_pause_seconds | int > 0
+        - (_ef_batch_index + 1) < (_ef_roll_batches | length)
+
+  rescue:
+    - name: Rolling | Stop after failed batch
+      ansible.builtin.fail:
+        msg: >-
+          Fleet Server did not become healthy on [{{ _ef_batch | join(', ') }}]
+          ('{{ ansible_failed_task.name | default('unknown') }}'). No further Fleet Servers were changed.
+          Check `elastic-agent status` and `journalctl -u elastic-agent` on those hosts.

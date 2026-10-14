@@ -1,0 +1,25 @@
+---
+- name: Firewall | Check whether firewalld is running  # noqa: command-instead-of-module
+  ansible.builtin.command:
+    cmd: systemctl is-active firewalld
+  register: _ef_firewalld_state
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Firewall | Open the Fleet Server port
+  ansible.posix.firewalld:
+    port: "{{ elastic_fleet_port }}/tcp"
+    zone: "{{ elastic_fleet_firewall_zone }}"
+    permanent: true
+    immediate: true
+    state: enabled
+  when: (_ef_firewalld_state.stdout | default('') | trim) == 'active'
+
+- name: Firewall | Report that firewalld is not running
+  ansible.builtin.debug:
+    msg: >-
+      elastic_fleet_manage_firewall is on but firewalld is not running on {{ inventory_hostname }}, so no
+      rules were added. Port {{ elastic_fleet_port }}/tcp has to be reachable from every agent however this
+      host filters traffic.
+  when: (_ef_firewalld_state.stdout | default('') | trim) != 'active'

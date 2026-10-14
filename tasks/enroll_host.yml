@@ -1,0 +1,37 @@
+---
+# Enrolls _ef_target as a Fleet Server (tasks are delegated to it), records the
+# settings it was enrolled with, and waits until it reports healthy.
+#
+# --force replaces an existing enrollment without prompting. The agent gets a
+# new id in Fleet; the old one shows as offline until it is removed.
+- name: "Enroll | Enroll as a Fleet Server: {{ _ef_target }}"
+  ansible.builtin.command:
+    argv: "{{ hostvars[_ef_target]._ef_enroll_argv_fact }}"
+  delegate_to: "{{ _ef_target }}"
+  # enroll waits for Fleet Server to start and check in; keep it running on the
+  # host if the SSH session drops meanwhile.
+  async: "{{ 0 if ansible_check_mode else (elastic_fleet_enroll_timeout | int) + 120 }}"
+  poll: 10
+  register: _ef_enroll
+  changed_when: true
+
+- name: "Enroll | Record the enrollment: {{ _ef_target }}"
+  ansible.builtin.copy:
+    content: "{{ hostvars[_ef_target]._ef_state_desired | to_nice_json }}"
+    dest: "{{ _ef_state_file }}"
+    owner: root
+    group: root
+    mode: "0600"
+  delegate_to: "{{ _ef_target }}"
+
+- name: "Enroll | Start Elastic Agent: {{ _ef_target }}"
+  ansible.builtin.systemd_service:
+    name: elastic-agent
+    state: started
+    enabled: true
+  delegate_to: "{{ _ef_target }}"
+
+- name: "Enroll | Wait for {{ _ef_target }}"
+  ansible.builtin.include_tasks: wait_ready.yml
+  vars:
+    _ef_wait_host: "{{ _ef_target }}"

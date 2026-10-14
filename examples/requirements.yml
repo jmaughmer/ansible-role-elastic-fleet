@@ -1,0 +1,19 @@
+---
+# Installs this role, ansible-role-elastic-tls and their collections for the
+# example playbook:
+#   ansible-galaxy install -r requirements.yml
+roles:
+  - name: elastic_fleet
+    src: https://github.com/jmaughmer/ansible-role-elastic-fleet.git
+    scm: git
+    version: main
+  - name: elastic_tls
+    src: https://github.com/jmaughmer/ansible-role-elastic-tls.git
+    scm: git
+    version: main
+
+collections:
+  - name: ansible.posix
+    version: ">=1.5.0"
+  - name: community.crypto
+    version: ">=2.10.0"

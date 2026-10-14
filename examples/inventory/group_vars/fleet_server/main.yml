@@ -1,0 +1,38 @@
+---
+elastic_fleet_version: "9.5.4"
+
+# ------------------------------------------------------------------ package source
+# Default: Elastic's public repository. To install from Red Hat Satellite / Katello:
+# elastic_fleet_repo_source: satellite
+# elastic_fleet_satellite_repo_id: ACME_Elastic_Elastic_9_x
+# elastic_fleet_satellite_repo_state: disabled
+
+# ------------------------------------------------------------------ certificates
+# Agents reach Fleet Server through fleet.example.com (a load balancer or the
+# virtual address keepalived moves between the two hosts), so that name must be
+# in each certificate as well as the host's own name.
+elastic_tls_certificates:
+  - name: "{{ inventory_hostname }}"
+    dns:
+      - "{{ inventory_hostname }}"
+      - fleet.example.com
+    usage: [server, client]
+
+# ------------------------------------------------------------------ Fleet Server
+# What agents are told to connect to (registered in Fleet as the Fleet Server host)
+elastic_fleet_public_urls: ["https://fleet.example.com:8220"]
+elastic_fleet_policy_id: fleet-server-policy
+elastic_fleet_policy_name: Fleet Server Policy
+
+# ------------------------------------------------------------------ Elasticsearch
+elastic_fleet_elasticsearch_group: elasticsearch
+elastic_fleet_service_token: "{{ vault_elastic_fleet_service_token }}"
+
+# ------------------------------------------------------------------ Kibana / Fleet
+elastic_fleet_kibana_url: "https://kb-1.example.com:5601"
+elastic_fleet_kibana_api_key: "{{ vault_elastic_fleet_kibana_api_key }}"
+# Point the default output at every Elasticsearch node, with the private CA.
+elastic_fleet_manage_output: true
+
+# ------------------------------------------------------------------ operations
+elastic_fleet_restart_batch_size: 1

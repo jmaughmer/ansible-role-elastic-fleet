@@ -1,0 +1,33 @@
+---
+- name: Install | Check the package source provides the requested version
+  ansible.builtin.import_tasks: package_version_check.yml
+  when:
+    - elastic_fleet_package_version_check | bool
+    - _ef_installed_version != elastic_fleet_version
+
+# Fresh installs, and version changes on hosts that are not serving yet, happen
+# here. Hosts already enrolled are upgraded in rolling batches instead.
+#
+# Package downloads run as async jobs so a dropped SSH session does not abort
+# them, and are retried if the download itself fails.
+- name: Install | Install Elastic Agent package
+  ansible.builtin.dnf:
+    name: "elastic-agent-{{ elastic_fleet_version }}"
+    state: present
+    allow_downgrade: false
+    lock_timeout: "{{ elastic_fleet_dnf_lock_timeout }}"
+    enablerepo: "{{ _ef_package_repos if _ef_package_repos | length > 0 else omit }}"
+  async: "{{ 0 if ansible_check_mode else elastic_fleet_download_async_timeout }}"
+  poll: "{{ elastic_fleet_download_async_poll }}"
+  register: _ef_package_install
+  until: _ef_package_install is not failed
+  retries: "{{ elastic_fleet_task_retries }}"
+  delay: "{{ elastic_fleet_task_delay }}"
+  when: >-
+    _ef_installed_version | length == 0
+    or (_ef_version_changing | bool and not (_ef_is_enrolled | bool))
+
+- name: Install | Record the installed version  # noqa: no-handler
+  ansible.builtin.set_fact:
+    _ef_version_changing: false
+  when: _ef_package_install is changed

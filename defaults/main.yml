@@ -1,0 +1,213 @@
+---
+# =============================================================================
+# Platform
+# =============================================================================
+# Distributions accepted by preflight, as reported by ansible_facts['distribution'].
+# Major versions 9 and 10 are supported. Other Enterprise Linux rebuilds, such as
+# CentOS (Stream) or OracleLinux, can be added here but are not tested.
+elastic_fleet_supported_distributions:
+  - RedHat
+  - AlmaLinux
+  - Rocky
+
+# =============================================================================
+# Package / repository
+# =============================================================================
+# Exact 9.x release of the elastic-agent package, which carries Fleet Server.
+# Must not be newer (major.minor) than Elasticsearch or Kibana. Changing it on
+# running hosts upgrades them in rolling batches.
+elastic_fleet_version: "9.5.4"
+
+# Where the elastic-agent package comes from:
+#   elastic   - Elastic's public repository, or a mirror of it. The role writes a
+#               disabled repository file and enables it only for its own dnf tasks.
+#   satellite - a repository synced into Red Hat Satellite or Katello and delivered
+#               through subscription-manager (redhat.repo). Hosts must be registered
+#               and the repository must be in their content view.
+#   none      - repositories are managed outside this role; packages come from
+#               whatever repositories are enabled on the host.
+elastic_fleet_repo_source: elastic
+
+# --- elastic_fleet_repo_source: elastic ---
+elastic_fleet_repo_baseurl: "https://artifacts.elastic.co/packages/{{ _ef_major_version }}.x/yum"
+elastic_fleet_repo_gpgkey: "https://artifacts.elastic.co/GPG-KEY-elasticsearch"
+elastic_fleet_repo_gpgcheck: true
+
+# --- elastic_fleet_repo_source: satellite ---
+# Repository id as listed by `subscription-manager repos --list`, normally
+# <organization label>_<product label>_<repository label>, e.g. ACME_Elastic_Elastic_9_x
+elastic_fleet_satellite_repo_id: ""
+# unmanaged - leave the enabled state to Satellite (activation key, content overrides)
+# enabled   - enable it with subscription-manager
+# disabled  - disable it so routine `dnf update` never upgrades Elastic Agent; the
+#             role still installs from it by enabling it for its own dnf tasks
+elastic_fleet_satellite_repo_state: unmanaged
+# Content overrides applied with `subscription-manager repo-override`, as strings:
+#   { timeout: "600", retries: "20", minrate: "100" }
+elastic_fleet_satellite_repo_overrides: {}
+# Run `subscription-manager refresh` once when the repository is not yet defined on the host.
+elastic_fleet_satellite_refresh: true
+# Optional GPG key to import: a URL or a path on the host. Empty relies on the
+# repository's own gpgkey setting.
+elastic_fleet_satellite_gpgkey: ""
+
+# Before installing or upgrading, check that elastic_fleet_version is available
+# from the package source. Catches Satellite content views that were not promoted.
+elastic_fleet_package_version_check: true
+
+# Inventory group containing every Fleet Server of this deployment.
+elastic_fleet_group: fleet_server
+
+# =============================================================================
+# Paths
+# =============================================================================
+# Fixed by the RPM package.
+elastic_fleet_agent_conf_dir: /etc/elastic-agent
+# TLS material and the service token file this role installs.
+elastic_fleet_ssl_dir: /etc/elastic-agent/fleet-server
+
+# =============================================================================
+# Fleet Server
+# =============================================================================
+# Address and port Fleet Server binds to.
+elastic_fleet_bind_host: "0.0.0.0"
+elastic_fleet_port: 8220
+
+# URL this agent uses to reach its own Fleet Server while enrolling. Its host
+# name has to be a SAN in the Fleet Server certificate.
+elastic_fleet_url: "https://{{ inventory_hostname }}:{{ elastic_fleet_port }}"
+
+# URLs agents are told to use, registered in Fleet as the Fleet Server host
+# (elastic_fleet_manage_fleet_settings). Every one of these names must be a SAN
+# in each Fleet Server's certificate. Use a load balancer or virtual address
+# when there are several Fleet Servers:
+#   elastic_fleet_public_urls: ["https://fleet.example.com:8220"]
+elastic_fleet_public_urls: >-
+  {{ groups[elastic_fleet_group] | default([])
+     | map('regex_replace', '^', 'https://') | map('regex_replace', '$', ':' ~ elastic_fleet_port) | list }}
+
+# Agent policy this Fleet Server enrolls into. Created when
+# elastic_fleet_manage_fleet_settings is true and it does not exist yet.
+elastic_fleet_policy_id: fleet-server-policy
+elastic_fleet_policy_name: Fleet Server Policy
+elastic_fleet_policy_namespace: default
+elastic_fleet_policy_description: "Managed by Ansible (ansible-role-elastic-fleet)"
+# Add the System integration (host metrics and logs) when the policy is created.
+elastic_fleet_policy_system_monitoring: true
+# Agent self-monitoring when the policy is created: logs, metrics, both or neither.
+elastic_fleet_policy_monitoring_enabled: [logs, metrics]
+
+# Client certificate authentication for agents connecting to Fleet Server:
+# none, optional or required.
+elastic_fleet_client_auth: none
+
+# Seconds enroll waits for Fleet Server to come up before giving up.
+elastic_fleet_enroll_timeout: 600
+# Extra arguments appended to `elastic-agent enroll`, e.g. ["--proxy-url=http://proxy:3128"]
+elastic_fleet_enroll_extra_args: []
+# Re-enroll a running Fleet Server when its enrollment settings change (URLs,
+# policy, certificate paths, service token). Re-enrolling gives the agent a new
+# id in Fleet; the old one shows as offline until it is removed.
+elastic_fleet_reenroll_on_change: true
+
+# =============================================================================
+# TLS
+# =============================================================================
+# Certificate Fleet Server serves, looked up by name in `ssl_certificates` and
+# then in `elastic_tls_ssl_certificates` (published by ansible-role-elastic-tls).
+elastic_fleet_ssl_certificate_name: "{{ inventory_hostname }}"
+# PEM CA that issued the Fleet Server certificates. Empty = the entry's own ca.
+elastic_fleet_ssl_ca_certificate: ""
+# Path to a CA file already on the host, as an alternative to the content above.
+elastic_fleet_ssl_ca_certificate_path: ""
+
+# =============================================================================
+# Connection to Elasticsearch
+# =============================================================================
+# Inventory group of Elasticsearch nodes; used to build elastic_fleet_elasticsearch_hosts.
+elastic_fleet_elasticsearch_group: elasticsearch
+elastic_fleet_elasticsearch_port: 9200
+elastic_fleet_elasticsearch_hosts: >-
+  {{ groups[elastic_fleet_elasticsearch_group] | default([])
+     | map('regex_replace', '^', 'https://') | map('regex_replace', '$', ':' ~ elastic_fleet_elasticsearch_port) | list }}
+# The URL Fleet Server bootstraps against (enroll takes one). A load-balanced
+# name is best; afterwards Fleet Server uses the hosts of the policy's output.
+elastic_fleet_elasticsearch_url: "{{ elastic_fleet_elasticsearch_hosts | first | default('') }}"
+# PEM CA for the Elasticsearch HTTP certificates. Empty = the Fleet Server CA.
+elastic_fleet_elasticsearch_ca_certificate: ""
+# Path to a CA file already on the host, as an alternative to the content above.
+elastic_fleet_elasticsearch_ca_certificate_path: ""
+
+# Token for the elastic/fleet-server service account (vault). Create one with:
+#   POST /_security/service/elastic/fleet-server/credential/token/<name>
+elastic_fleet_service_token: ""
+
+# Check connectivity, the service token and Elasticsearch version compatibility
+# from every Fleet Server host before enrolling.
+elastic_fleet_elasticsearch_check: true
+
+# =============================================================================
+# Fleet settings in Kibana
+# =============================================================================
+# Through the Kibana Fleet API, once per run: run Fleet setup, create the Fleet
+# Server policy when missing, and register elastic_fleet_public_urls as the Fleet
+# Server host. Set to false when Fleet is configured some other way (the UI, or
+# xpack.fleet.* preconfiguration in kibana.yml); the policy must then exist.
+elastic_fleet_manage_fleet_settings: true
+
+elastic_fleet_kibana_group: kibana
+elastic_fleet_kibana_url: "https://{{ (groups[elastic_fleet_kibana_group] | default(['localhost'])) | first }}:5601"
+# Credentials of a user allowed to manage Fleet (vault): an API key
+# (base64 "id:api_key", sent as "ApiKey ...") or a user name and password.
+elastic_fleet_kibana_api_key: ""
+elastic_fleet_kibana_username: elastic
+elastic_fleet_kibana_password: ""
+# PEM CA for Kibana's certificate. Empty = the Fleet Server CA.
+elastic_fleet_kibana_ca_certificate: ""
+elastic_fleet_kibana_ca_certificate_path: ""
+
+# Fleet Server host entry in Fleet (Settings > Fleet Server hosts).
+elastic_fleet_server_host_id: fleet-default-fleet-server-host
+elastic_fleet_server_host_name: Default
+elastic_fleet_server_host_is_default: true
+
+# Also manage the Elasticsearch output agents send data to, with
+# elastic_fleet_elasticsearch_hosts and the Elasticsearch CA. Off by default:
+# outputs are often preconfigured in kibana.yml, which the API cannot change.
+elastic_fleet_manage_output: false
+elastic_fleet_output_id: fleet-default-output
+elastic_fleet_output_name: default
+elastic_fleet_output_hosts: "{{ elastic_fleet_elasticsearch_hosts }}"
+
+# =============================================================================
+# Operation
+# =============================================================================
+elastic_fleet_manage_firewall: true
+elastic_fleet_firewall_zone: public
+
+# Restart (or upgrade, or re-enroll) running Fleet Servers this many at a time
+# when something changes, waiting for each batch to report healthy.
+elastic_fleet_restart_on_change: true
+elastic_fleet_force_restart: false
+elastic_fleet_restart_batch_size: 1
+elastic_fleet_restart_pause_seconds: 0
+
+# Readiness probe: GET /api/status on elastic_fleet_url must report HEALTHY.
+elastic_fleet_ready_retries: 60
+elastic_fleet_ready_delay: 5
+
+# =============================================================================
+# Network resilience (high-latency / low-bandwidth links)
+# =============================================================================
+elastic_fleet_task_retries: 3
+elastic_fleet_task_delay: 15
+# Package downloads run as async jobs so they keep running if SSH drops.
+elastic_fleet_download_async_timeout: 3600
+elastic_fleet_download_async_poll: 15
+elastic_fleet_repo_timeout: 120
+elastic_fleet_repo_retries: 10
+elastic_fleet_dnf_lock_timeout: 300
+# Per-request HTTP timeout (seconds) for Elasticsearch, Kibana and status calls
+elastic_fleet_api_timeout: 30
+
+elastic_fleet_no_log: true

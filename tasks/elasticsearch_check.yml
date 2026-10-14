@@ -1,0 +1,60 @@
+---
+# Validates, from every Fleet Server host and with the service token Fleet
+# Server will use, that Elasticsearch is reachable, trusted through the
+# configured CA, accepts the token and is not older than Fleet Server.
+# Runs before anything is enrolled.
+
+- name: Elasticsearch | Probe every Elasticsearch host with the service token
+  ansible.builtin.uri:
+    url: "{{ item }}/"
+    headers: "{{ _ef_es_auth_headers }}"
+    ca_path: "{{ _ef_es_ca_file }}"
+    validate_certs: true
+    timeout: "{{ elastic_fleet_api_timeout }}"
+    status_code: [200]
+  loop: "{{ elastic_fleet_elasticsearch_hosts }}"
+  register: _ef_es_probe
+  # retry only while the host could not be reached at all; a rejection is final
+  until: (_ef_es_probe.status | default(-1)) in [200, 401, 403]
+  retries: "{{ elastic_fleet_task_retries }}"
+  delay: "{{ elastic_fleet_task_delay }}"
+  failed_when: false
+  no_log: "{{ elastic_fleet_no_log }}"
+
+- name: Elasticsearch | Summarise probe results
+  ansible.builtin.set_fact:
+    _ef_es_ok_versions: >-
+      {{ _ef_es_probe.results | selectattr('status', 'equalto', 200)
+         | map(attribute='json') | map(attribute='version') | map(attribute='number') | unique | list }}
+    _ef_es_rejected: "{{ _ef_es_probe.results | selectattr('status', 'in', [401, 403]) | map(attribute='item') | list }}"
+    _ef_es_unreachable: >-
+      {{ _ef_es_probe.results | rejectattr('status', 'in', [200, 401, 403])
+         | map(attribute='item') | zip(_ef_es_probe.results | rejectattr('status', 'in', [200, 401, 403])
+                                        | map(attribute='msg') | list) | map('join', ' - ') | list }}
+
+- name: Elasticsearch | Warn about unreachable Elasticsearch hosts
+  ansible.builtin.debug:
+    msg: "Fleet Server on {{ inventory_hostname }} cannot reach: {{ _ef_es_unreachable }}"
+  when: _ef_es_unreachable | length > 0
+
+- name: Elasticsearch | Verify connectivity and the service token
+  ansible.builtin.assert:
+    that:
+      - _ef_es_rejected | length == 0
+      - _ef_es_ok_versions | length > 0
+    fail_msg: >-
+      {% if _ef_es_rejected | length > 0 %}Elasticsearch rejected the elastic_fleet_service_token on
+      {{ _ef_es_rejected }}. It must be a valid token of the elastic/fleet-server service account.
+      {% else %}No Elasticsearch host is reachable from {{ inventory_hostname }} with the configured CA:
+      {{ _ef_es_unreachable }}.{% endif %}
+    quiet: true
+
+- name: Elasticsearch | Verify Elasticsearch is not older than Fleet Server
+  ansible.builtin.assert:
+    that:
+      - (item.split('.')[0:2] | join('.')) is version(elastic_fleet_version.split('.')[0:2] | join('.'), '>=')
+    fail_msg: >-
+      Elasticsearch {{ item }} is older than Fleet Server {{ elastic_fleet_version }}. Upgrade Elasticsearch
+      and Kibana first; Fleet Server must not be newer than either.
+    quiet: true
+  loop: "{{ _ef_es_ok_versions }}"

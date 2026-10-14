@@ -1,0 +1,25 @@
+---
+# Included on the first host of the play only. Fleet Servers already serving
+# agents are upgraded, re-enrolled or restarted at most
+# elastic_fleet_restart_batch_size at a time, so the others keep serving.
+
+- name: Rolling | Build plan
+  ansible.builtin.set_fact:
+    _ef_roll_batches: >-
+      {{ ansible_play_hosts | map('extract', hostvars)
+         | selectattr('_ef_needs_rolling', 'defined') | selectattr('_ef_needs_rolling')
+         | map(attribute='inventory_hostname') | list
+         | batch(elastic_fleet_restart_batch_size | int) | list }}
+
+- name: Rolling | Show plan
+  ansible.builtin.debug:
+    msg: "{{ _ef_roll_batches | map('join', ', ') | list }}"
+  when: _ef_roll_batches | length > 0
+
+- name: Rolling | Process batches
+  ansible.builtin.include_tasks: restart_batch.yml
+  loop: "{{ _ef_roll_batches }}"
+  loop_control:
+    loop_var: _ef_batch
+    index_var: _ef_batch_index
+    label: "{{ _ef_batch | join(', ') }}"

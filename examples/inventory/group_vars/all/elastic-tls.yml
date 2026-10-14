@@ -1,0 +1,6 @@
+---
+# The same private CA as the rest of the stack, so Fleet Server trusts
+# Elasticsearch and Kibana, and agents trust Fleet Server, through one file.
+elastic_tls_provider: ca
+elastic_tls_ca_common_name: "Example Corp Internal CA"
+elastic_tls_ca_passphrase: "{{ vault_elastic_tls_ca_passphrase }}"

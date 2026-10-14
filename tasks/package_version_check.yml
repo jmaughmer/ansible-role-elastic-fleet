@@ -1,0 +1,35 @@
+---
+# Runs only when a package install or upgrade is about to happen. Confirms the
+# pinned version exists in the package source before anything is changed; with
+# Satellite this catches content views that were not published or promoted.
+# For upgrades this runs well before any running Fleet Server is touched.
+- name: Install | Query available Elastic Agent versions
+  ansible.builtin.command:
+    argv: >-
+      {{ ['dnf', '-q', 'repoquery', '--qf', '%{version}']
+         + ((['--disablerepo=*'] + (_ef_package_repos | map('regex_replace', '^', '--enablerepo=') | list))
+            if _ef_package_repos | length > 0 else [])
+         + ['elastic-agent'] }}
+  register: _ef_available_versions
+  until: _ef_available_versions is not failed
+  retries: "{{ elastic_fleet_task_retries }}"
+  delay: "{{ elastic_fleet_task_delay }}"
+  changed_when: false
+  check_mode: false
+
+- name: Install | Verify the requested Elastic Agent version is available
+  vars:
+    _ef_versions: >-
+      {{ _ef_available_versions.stdout_lines | map('trim') | select('match', '^[0-9]') | unique | list }}
+  ansible.builtin.assert:
+    that:
+      - elastic_fleet_version in _ef_versions
+    fail_msg: >-
+      elastic-agent {{ elastic_fleet_version }} is not available from
+      {{ {'elastic': 'repository ' ~ _ef_repo_name,
+          'satellite': 'Satellite repository ' ~ elastic_fleet_satellite_repo_id,
+          'none': 'the enabled repositories'}[elastic_fleet_repo_source] }} on {{ inventory_hostname }}
+      (available: {{ (_ef_versions | sort | join(', ')) or 'none' }}).
+      {% if elastic_fleet_repo_source == 'satellite' %}Sync the repository, then publish and promote a
+      content view version that includes it to this host's lifecycle environment.{% endif %}
+    quiet: true
