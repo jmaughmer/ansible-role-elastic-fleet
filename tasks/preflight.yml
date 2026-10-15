@@ -107,6 +107,30 @@
   when: elastic_fleet_manage_fleet_settings | bool
   no_log: "{{ elastic_fleet_no_log }}"
 
+- name: Preflight | Verify agent policies
+  ansible.builtin.assert:
+    that:
+      - elastic_fleet_agent_policies is sequence and elastic_fleet_agent_policies is not string
+      - elastic_fleet_agent_policies | reject('mapping') | list | length == 0
+      - elastic_fleet_agent_policies | rejectattr('id', 'defined') | list | length == 0
+      - elastic_fleet_agent_policies | rejectattr('name', 'defined') | list | length == 0
+      - >-
+        elastic_fleet_agent_policies | map(attribute='id') | map('string')
+        | reject('match', '^[A-Za-z0-9_.:-]+$') | list | length == 0
+      - elastic_fleet_agent_policies | map(attribute='id') | unique | list | length == elastic_fleet_agent_policies | length
+      - elastic_fleet_policy_id not in (elastic_fleet_agent_policies | map(attribute='id') | list)
+      - >-
+        elastic_fleet_agent_policies | selectattr('monitoring_enabled', 'defined') | map(attribute='monitoring_enabled')
+        | map('difference', ['logs', 'metrics']) | select | list | length == 0
+      - (elastic_fleet_enrollment_token_name | length) > 0
+    fail_msg: >-
+      elastic_fleet_agent_policies must be a list of mappings, each with a unique id (letters, digits and
+      _ . : -) and a name, none using the Fleet Server policy id '{{ elastic_fleet_policy_id }}';
+      monitoring_enabled, when set, a subset of [logs, metrics]; and elastic_fleet_enrollment_token_name
+      must not be empty.
+    quiet: true
+  when: elastic_fleet_manage_fleet_settings | bool
+
 # Fleet settings are managed once per run, from the first host, so every host
 # in the play has to agree on them.
 - name: Preflight | Record the Fleet settings this host expects
@@ -114,14 +138,16 @@
     _ef_fleet_settings_fact:
       policy_id: "{{ elastic_fleet_policy_id }}"
       public_urls: "{{ elastic_fleet_public_urls }}"
+      agent_policies: "{{ elastic_fleet_agent_policies }}"
 
 - name: Preflight | Verify every Fleet Server expects the same Fleet settings
   ansible.builtin.assert:
     that:
       - ansible_play_hosts | map('extract', hostvars, '_ef_fleet_settings_fact') | unique | list | length == 1
     fail_msg: >-
-      Fleet Servers in this play disagree on elastic_fleet_policy_id or elastic_fleet_public_urls. Set them
-      once for the group, or apply the role in separate plays for separate policies.
+      Fleet Servers in this play disagree on elastic_fleet_policy_id, elastic_fleet_public_urls or
+      elastic_fleet_agent_policies. Set them once for the group, or apply the role in separate plays for
+      separate policies.
     quiet: true
   run_once: true
 

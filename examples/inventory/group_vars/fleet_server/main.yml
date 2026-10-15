@@ -34,5 +34,15 @@ elastic_fleet_kibana_api_key: "{{ vault_elastic_fleet_kibana_api_key }}"
 # Point the default output at every Elasticsearch node, with the private CA.
 elastic_fleet_manage_output: true
 
+# ------------------------------------------------------------------ agent policies
+# Created in Fleet; an enrollment token for each is published as
+# elastic_fleet_enrollment_tokens for ansible-role-elastic-agent.
+elastic_fleet_agent_policies:
+  - id: agent-policy
+    name: Agent Policy
+  - id: linux-servers
+    name: Linux servers
+    namespace: prod
+
 # ------------------------------------------------------------------ operations
 elastic_fleet_restart_batch_size: 1

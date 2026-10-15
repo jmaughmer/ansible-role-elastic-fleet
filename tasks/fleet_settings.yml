@@ -189,3 +189,7 @@
             or (_ef_output_current.ssl.certificate_authorities | default([]) | map('trim') | list)
                != _ef_output_desired.ssl.certificate_authorities
           no_log: "{{ elastic_fleet_no_log }}"
+
+    # ------------------------------------------- Agent policies and tokens
+    - name: Fleet | Manage agent policies and enrollment tokens
+      ansible.builtin.import_tasks: agent_policies.yml

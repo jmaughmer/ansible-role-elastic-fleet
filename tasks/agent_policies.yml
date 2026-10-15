@@ -1,0 +1,102 @@
+---
+# Agent policies for ordinary Elastic Agents, and one enrollment token for each,
+# published for ansible-role-elastic-agent. Imported by fleet_settings.yml, so
+# it runs once, with its Kibana connection settings.
+
+# ----------------------------------------------------------- Agent policies
+- name: Fleet | Look up the agent policies
+  ansible.builtin.uri:
+    url: "{{ _ef_kibana_url }}/api/fleet/agent_policies/{{ item.id | urlencode }}"
+    status_code: [200, 404]
+  loop: "{{ elastic_fleet_agent_policies }}"
+  loop_control:
+    label: "{{ item.id }}"
+  register: _ef_agent_policy
+  until: _ef_agent_policy.status | default(-1) in [200, 404]
+  retries: "{{ elastic_fleet_task_retries }}"
+  delay: "{{ elastic_fleet_task_delay }}"
+  no_log: "{{ elastic_fleet_no_log }}"
+
+# An existing policy is left as it is: edit it in Fleet.
+- name: Fleet | Create the agent policies
+  ansible.builtin.uri:
+    url: >-
+      {{ _ef_kibana_url }}/api/fleet/agent_policies?sys_monitoring={{
+         'true' if item.item.system_monitoring | default(true) | bool else 'false' }}
+    method: POST
+    body:
+      id: "{{ item.item.id }}"
+      name: "{{ item.item.name }}"
+      namespace: "{{ item.item.namespace | default(elastic_fleet_policy_namespace) }}"
+      description: "{{ item.item.description | default(elastic_fleet_agent_policy_description) }}"
+      monitoring_enabled: "{{ item.item.monitoring_enabled | default(['logs', 'metrics']) }}"
+    status_code: [200]
+  loop: "{{ _ef_agent_policy.results }}"
+  loop_control:
+    label: "{{ item.item.id }}"
+  changed_when: true
+  when: item.status == 404
+  no_log: "{{ elastic_fleet_no_log }}"
+
+# ------------------------------------------------------- Enrollment tokens
+# Fleet names a token "<name> (<uuid>)", so it is matched on that prefix.
+- name: Fleet | Look up the enrollment tokens of the agent policies
+  ansible.builtin.uri:
+    url: >-
+      {{ _ef_kibana_url }}/api/fleet/enrollment_api_keys?perPage=1000&kuery={{
+         ('policy_id:"' ~ item.id ~ '"') | urlencode }}
+    status_code: [200]
+  loop: "{{ elastic_fleet_agent_policies }}"
+  loop_control:
+    label: "{{ item.id }}"
+  register: _ef_enrollment_keys
+  until: _ef_enrollment_keys is not failed
+  retries: "{{ elastic_fleet_task_retries }}"
+  delay: "{{ elastic_fleet_task_delay }}"
+  no_log: "{{ elastic_fleet_no_log }}"
+
+- name: Fleet | Pick the enrollment token of each agent policy
+  ansible.builtin.set_fact:
+    _ef_enrollment_found: >-
+      {{ _ef_enrollment_found | default({})
+         | combine({item.item.id: (item.json['items'] | default([])
+                                   | selectattr('policy_id', 'equalto', item.item.id)
+                                   | selectattr('active', 'equalto', true)
+                                   | selectattr('name', 'match', _ef_token_name_re)
+                                   | map(attribute='api_key') | first | default(''))}) }}
+  vars:
+    _ef_token_name_re: >-
+      ^{{ item.item.token_name | default(elastic_fleet_enrollment_token_name) | regex_escape }}( \(.*\))?$
+  loop: "{{ _ef_enrollment_keys.results }}"
+  loop_control:
+    label: "{{ item.item.id }}"
+  no_log: "{{ elastic_fleet_no_log }}"
+
+- name: Fleet | Create missing enrollment tokens
+  ansible.builtin.uri:
+    url: "{{ _ef_kibana_url }}/api/fleet/enrollment_api_keys"
+    method: POST
+    body:
+      policy_id: "{{ item.id }}"
+      name: "{{ item.token_name | default(elastic_fleet_enrollment_token_name) }}"
+    status_code: [200]
+  loop: "{{ elastic_fleet_agent_policies }}"
+  loop_control:
+    label: "{{ item.id }}"
+  register: _ef_enrollment_created
+  changed_when: true
+  when: (_ef_enrollment_found | default({}))[item.id] | default('') | length == 0
+  no_log: "{{ elastic_fleet_no_log }}"
+
+# ------------------------------------------------------------------ Publish
+# Read by ansible-role-elastic-agent, from any host of this play:
+#   hostvars[groups['fleet_server'] | first].elastic_fleet_enrollment_tokens['agent-policy']
+- name: Fleet | Publish the enrollment URLs and tokens
+  ansible.builtin.set_fact:
+    elastic_fleet_enrollment_urls: "{{ elastic_fleet_public_urls }}"
+    elastic_fleet_enrollment_tokens: >-
+      {{ (_ef_enrollment_found | default({})) | combine(dict(_ef_created | map(attribute='item.id')
+                                                             | zip(_ef_created | map(attribute='json.item.api_key')))) }}
+  vars:
+    _ef_created: "{{ _ef_enrollment_created.results | selectattr('json', 'defined') | list }}"
+  no_log: "{{ elastic_fleet_no_log }}"

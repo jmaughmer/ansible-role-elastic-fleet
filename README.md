@@ -90,7 +90,7 @@ The inventory needs a `fleet_server` group, plus `elasticsearch` and `kibana` gr
 ## How a run works
 
 1. **Every host in parallel:** gather state, preflight, configure the repository, install the package on new hosts, open the firewall, install certificates and the service token, and probe Elasticsearch with the token.
-2. **Once, from the first host:** Fleet settings in Kibana (setup, policy, Fleet Server host, output).
+2. **Once, from the first host:** Fleet settings in Kibana (setup, policy, Fleet Server host, output, agent policies and their enrollment tokens).
 3. **Hosts not yet enrolled** are enrolled and started in parallel, then waited on until `/api/status` reports `HEALTHY`.
 4. **Hosts already serving** that need something — a new version, new enrollment settings, or new certificates — are handled in batches of `elastic_fleet_restart_batch_size`.
 
@@ -146,8 +146,43 @@ With `elastic_fleet_manage_fleet_settings: true` (the default), the first host o
 | Fleet Server policy | `elastic_fleet_policy_id` | Created with the Fleet Server integration when missing (plus the System integration with `elastic_fleet_policy_system_monitoring`). An existing policy is not modified; edit it in Fleet. |
 | Fleet Server host | `elastic_fleet_server_host_id` | Created or updated so its URLs are `elastic_fleet_public_urls`. |
 | Elasticsearch output | `elastic_fleet_output_id` | Only with `elastic_fleet_manage_output: true`: hosts set to `elastic_fleet_output_hosts`, CA set to the Elasticsearch CA. |
+| Agent policies | `elastic_fleet_agent_policies[].id` | Created when missing. An existing policy is not modified. |
+| Enrollment tokens | `token_name` / `elastic_fleet_enrollment_token_name` | One active token per agent policy, reused by name or created, and published for the elastic-agent role. |
 
 Objects preconfigured in `kibana.yml` (`xpack.fleet.fleetServerHosts`, `xpack.fleet.outputs`) cannot be changed through the API; the role stops with an explanation when they differ from what you asked for.
+
+## Agent policies and enrollment tokens
+
+Ordinary Elastic Agents enroll into the policies in `elastic_fleet_agent_policies`, which the role creates alongside the Fleet Server policy. By default that is one policy, `agent-policy`:
+
+```yaml
+elastic_fleet_agent_policies:
+  - id: agent-policy
+    name: Agent Policy
+  - id: linux-servers
+    name: Linux servers
+    namespace: prod
+    monitoring_enabled: [logs]   # default [logs, metrics]
+    system_monitoring: true      # add the System integration on creation
+    token_name: ansible          # default elastic_fleet_enrollment_token_name
+```
+
+For each policy the role looks for an active enrollment token named `token_name` (Fleet stores it as `<name> (<uuid>)`) and creates one when there is none. The default name, `Default`, is the token Fleet creates with every new policy, so nothing extra is created. Revoke a token in Fleet and the next run creates a new one.
+
+The role then publishes two facts on every host of the play, for [ansible-role-elastic-agent](https://github.com/jmaughmer/ansible-role-elastic-agent) to read in a later play:
+
+| Fact | Value |
+|---|---|
+| `elastic_fleet_enrollment_urls` | `elastic_fleet_public_urls` |
+| `elastic_fleet_enrollment_tokens` | `{policy id: enrollment token}` for every agent policy |
+
+```yaml
+# For example, in the elastic-agent play
+elastic_agent_fleet_url: "{{ hostvars[groups['fleet_server'] | first].elastic_fleet_enrollment_urls | first }}"
+elastic_agent_enrollment_token: "{{ hostvars[groups['fleet_server'] | first].elastic_fleet_enrollment_tokens['agent-policy'] }}"
+```
+
+The facts only exist when the Fleet settings tasks ran in the same `ansible-playbook` run, so keep the Fleet Server play in the playbook (and the `elastic_fleet_settings` tag selected) when deploying agents. An enrollment token only lets an agent join its policy, but it is still a secret: with fact caching enabled it is written to the cache.
 
 ## Enrollment and re-enrollment
 
@@ -203,7 +238,7 @@ Downloads run as async jobs that survive a dropped SSH session, and every task t
 ## Notes and caveats
 
 - **Check mode** is not supported for first installs: the certificate checks read files that do not exist yet.
-- **One policy per play.** Fleet settings are managed once per run, so every host in the play must use the same `elastic_fleet_policy_id` and `elastic_fleet_public_urls`.
+- **One policy per play.** Fleet settings are managed once per run, so every host in the play must use the same `elastic_fleet_policy_id`, `elastic_fleet_public_urls` and `elastic_fleet_agent_policies`.
 - **Removing a host** from the group leaves its agent enrolled and running. Unenroll it in Fleet and remove the package.
 - **The service token stays on the host** in a root-only file; Elastic Agent also keeps it, encrypted, in its own state.
 
@@ -227,6 +262,8 @@ Downloads run as async jobs that survive a dropped SSH session, and every task t
 | `elastic_fleet_kibana_url` | first `kibana` host on 5601 | Kibana for the Fleet API |
 | `elastic_fleet_kibana_api_key` | `""` | Kibana credentials (or username and password) |
 | `elastic_fleet_manage_output` | `false` | Also manage the default Elasticsearch output |
+| `elastic_fleet_agent_policies` | one, `agent-policy` | Agent policies to create, each with a published enrollment token |
+| `elastic_fleet_enrollment_token_name` | `Default` | Enrollment token reused or created in each agent policy |
 | `elastic_fleet_restart_batch_size` | `1` | Fleet Servers changed at a time |
 | `elastic_fleet_reenroll_on_change` | `true` | Re-enroll when enrollment settings change |
 
@@ -250,6 +287,7 @@ Useful tags: `elastic_fleet_install`, `elastic_fleet_tls`, `elastic_fleet_settin
 │   ├── certificates.yml        # TLS material, service token, checks
 │   ├── elasticsearch_check.yml # token, CA and version, from every host
 │   ├── fleet_settings.yml      # Fleet API: setup, policy, host, output
+│   ├── agent_policies.yml      # agent policies and enrollment tokens
 │   ├── enrollment.yml          # what each host needs
 │   ├── service.yml             # enroll and start new Fleet Servers
 │   ├── enroll_host.yml
