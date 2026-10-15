@@ -99,7 +99,7 @@
           - test_record.fingerprint != test_converge_state.fingerprint
           - "'--fleet-server-timeout=610s' in _ef_enroll_argv_fact"
 
-    # enroll restarts the running agent itself, so only the enrollment is checked.
+    # Re-enrolling stops and starts the agent, so only the enrollment is checked.
     - name: Check every Fleet Server was re-enrolled
       ansible.builtin.include_tasks: tasks/check_restart.yml
       vars:

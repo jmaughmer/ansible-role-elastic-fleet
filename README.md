@@ -188,7 +188,7 @@ The facts only exist when the Fleet settings tasks ran in the same `ansible-play
 
 The role records a salted SHA-256 of the enrollment settings — the `enroll` arguments, the service token and the key passphrase — in `/etc/elastic-agent/.ansible-fleet-server-state.json`. A host is enrolled when that record and Elastic Agent's own `/etc/elastic-agent/fleet.enc` both exist.
 
-When the settings change (another URL, policy or token) a running Fleet Server is re-enrolled with `--force` in its batch. Re-enrolling gives the agent a **new id in Fleet**; the old one shows as offline until you remove it (or Fleet's inactivity timeout does). Set `elastic_fleet_reenroll_on_change: false` to be told instead.
+When the settings change (another URL, policy or token) a running Fleet Server is stopped, re-enrolled with `--force` and started again, in its batch. Re-enrolling gives the agent a **new id in Fleet**; the old one shows as offline until you remove it (or Fleet's inactivity timeout does). Set `elastic_fleet_reenroll_on_change: false` to be told instead.
 
 An agent that was enrolled by hand, or as an ordinary agent, has no record, so the role enrolls it as a Fleet Server on the first run.
 

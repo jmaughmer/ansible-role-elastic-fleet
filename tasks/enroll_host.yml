@@ -4,6 +4,17 @@
 #
 # --force replaces an existing enrollment without prompting. The agent gets a
 # new id in Fleet; the old one shows as offline until it is removed.
+#
+# Enroll runs against a stopped agent, as on a fresh install: enroll then
+# bootstraps Fleet Server itself. Re-enrolling a running Fleet Server sends
+# the enroll request to the running one without an enrollment key ("missing
+# enrollment api key") until enroll times out.
+- name: "Enroll | Stop Elastic Agent before enrolling: {{ _ef_target }}"
+  ansible.builtin.systemd_service:
+    name: elastic-agent
+    state: stopped
+  delegate_to: "{{ _ef_target }}"
+
 - name: "Enroll | Enroll as a Fleet Server: {{ _ef_target }}"
   ansible.builtin.command:
     argv: "{{ hostvars[_ef_target]._ef_enroll_argv_fact }}"
