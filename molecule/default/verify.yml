@@ -137,7 +137,7 @@
     # timeout passes, so this looks for an online agent from this host.
     - name: Wait for this Fleet Server's agent to be online in Fleet
       ansible.builtin.uri:
-        url: "{{ test_kibana }}/agents?perPage=100&kuery={{ ('policy_id:\"' ~ elastic_fleet_policy_id ~ '\"') | urlencode }}"
+        url: "{{ test_kibana }}/agents?perPage=100&kuery={{ ('policy_id:\"' ~ test_policy_id ~ '\"') | urlencode }}"
       register: test_agents
       until: >-
         test_agents.json['items'] | default([])
@@ -150,11 +150,11 @@
       ansible.builtin.uri:
         url: "{{ test_kibana }}/{{ item }}"
       loop:
-        - agent_policies/{{ elastic_fleet_policy_id }}
+        - agent_policies/{{ test_policy_id }}
         - agent_policies/agent-policy
         - agent_policies/molecule-servers
-        - fleet_server_hosts/{{ elastic_fleet_server_host_id }}
-        - outputs/{{ elastic_fleet_output_id }}
+        - fleet_server_hosts/{{ test_server_host_id }}
+        - outputs/{{ test_output_id }}
       register: test_fleet
       run_once: true
 

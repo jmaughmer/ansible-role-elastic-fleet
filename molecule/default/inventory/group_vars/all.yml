@@ -7,7 +7,13 @@ test_role_dir: "{{ lookup('env', 'MOLECULE_PROJECT_DIRECTORY') }}"
 # The role's own elastic_fleet_version. Elasticsearch and Kibana are installed at
 # that version and verify.yml expects Fleet Server to end up at it, so the tests
 # follow the default.
-test_default_version: "{{ (lookup('ansible.builtin.file', test_role_dir ~ '/defaults/main.yml') | from_yaml).elastic_fleet_version }}"
+test_role_defaults: "{{ lookup('ansible.builtin.file', test_role_dir ~ '/defaults/main.yml') | from_yaml }}"
+test_default_version: "{{ test_role_defaults.elastic_fleet_version }}"
+# Ids of the Fleet objects the role manages, for verify.yml, which runs
+# outside the role and so does not see its defaults.
+test_policy_id: "{{ test_role_defaults.elastic_fleet_policy_id }}"
+test_server_host_id: "{{ test_role_defaults.elastic_fleet_server_host_id }}"
+test_output_id: "{{ test_role_defaults.elastic_fleet_output_id }}"
 
 test_es_host: "{{ groups['elasticsearch'] | first }}"
 # By address rather than by name: the containers are not guaranteed to resolve

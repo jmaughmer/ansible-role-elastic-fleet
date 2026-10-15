@@ -10,9 +10,16 @@
 #   4. elastic_fleet_force_restart: every Fleet Server is restarted, one per
 #      batch, and keeps its agent id.
 # verify.yml then sees the converge settings.
+# The role's Elasticsearch and Fleet Server URLs come from every host's
+# address (inventory group_vars), so every host's facts are needed.
+- name: Gather facts from every host
+  hosts: all
+  gather_facts: true
+  tasks: []
+
 - name: Record the state before any change
   hosts: fleet_server
-  gather_facts: true
+  gather_facts: false
   tasks:
     - name: Read Elastic Agent's main PID
       ansible.builtin.systemd_service:
