@@ -330,8 +330,7 @@ MOLECULE_DISTRO=rockylinux10 molecule test -s preflight
 ```
 
 Lint with `yamllint .` and `ansible-lint` (configured by [`.yamllint`](.yamllint) and
-[`.ansible-lint`](.ansible-lint)). [`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs both,
-then every Podman scenario on both distros.
+[`.ansible-lint`](.ansible-lint)). The tests run locally; there is no CI workflow.
 
 Not covered by containers: firewalld rules, FIPS mode, fapolicyd and Satellite repositories.
 These need virtual machines with firewalld running, FIPS or fapolicyd enabled, or a Satellite
