@@ -8,10 +8,16 @@
     name: elastic-agent
   register: test_unit
 
+# status exits 1 while any unit is not healthy, as it can be just after a
+# restart or an enrollment; the JSON still carries the agent's id.
 - name: Read Elastic Agent's id
   ansible.builtin.command: elastic-agent status --output json
   register: test_agent_status
   changed_when: false
+  failed_when: test_agent_status.stdout is not search('"id"')
+  until: test_agent_status is not failed
+  retries: 12
+  delay: 5
 
 - name: Check Elastic Agent's PID
   ansible.builtin.assert:
@@ -23,7 +29,7 @@
     fail_msg: >-
       On {{ inventory_hostname }} Elastic Agent's PID went from {{ test_pid_before }} to
       {{ test_unit.status.MainPID }} ({{ test_unit.status.ActiveState }}); expected
-      {{ 'a restart' if test_restarted else 'the same process' }}.
+      {{ 'a running process' if test_restarted is not defined else ('a restart' if test_restarted else 'the same process') }}.
 
 - name: Check Elastic Agent's id
   vars:
@@ -33,7 +39,7 @@
       - test_reenrolled is not defined or (test_agent_id != test_agent_id_before) == test_reenrolled
     fail_msg: >-
       On {{ inventory_hostname }} the agent id went from {{ test_agent_id_before }} to {{ test_agent_id }};
-      expected {{ 'a new enrollment' if test_reenrolled else 'the same one' }}.
+      expected {{ 'a new enrollment' if test_reenrolled | default(false) else 'the same one' }}.
 
 - name: Remember the PID and the agent id
   ansible.builtin.set_fact:

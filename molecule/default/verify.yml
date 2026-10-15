@@ -119,6 +119,21 @@
       retries: 24
       delay: 5
 
+- name: Verify every Elastic Agent unit is healthy
+  hosts: fleet_server
+  gather_facts: false
+  tasks:
+    # status exits 0 only when every unit is healthy. A unit that cannot
+    # reach the output (for example Fleet's default http://localhost:9200)
+    # stays degraded.
+    - name: Wait for Elastic Agent to report every unit healthy
+      ansible.builtin.command: elastic-agent status --output json
+      register: test_agent_status
+      changed_when: false
+      until: test_agent_status.rc == 0
+      retries: 24
+      delay: 5
+
 - name: Verify the Fleet settings in Kibana
   hosts: fleet_server
   gather_facts: false

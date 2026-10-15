@@ -30,6 +30,7 @@
       ansible.builtin.command: elastic-agent status --output json
       register: test_agent_status
       changed_when: false
+      failed_when: test_agent_status.stdout is not search('"id"')
 
     - name: Read the enrollment record
       ansible.builtin.slurp:
