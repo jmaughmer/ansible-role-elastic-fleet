@@ -1,0 +1,238 @@
+---
+# Shared by every scenario that installs Fleet Server. What it expects follows
+# the inventory: inline or on-host TLS material, and whether the key has a
+# passphrase.
+- name: Gather facts from every host
+  hosts: all
+  gather_facts: true
+  tasks: []
+
+- name: Verify the installation and enrollment
+  hosts: fleet_server
+  gather_facts: false
+  vars:
+    test_ssl_entry: "{{ ssl_certificates | selectattr('name', 'equalto', inventory_hostname) | first }}"
+    test_has_passphrase: "{{ test_ssl_entry.key.passphrase is defined }}"
+    test_dir: /etc/elastic-agent/fleet-server
+  tasks:
+    - name: Read the service state
+      ansible.builtin.service_facts:
+
+    - name: Check Elastic Agent is running and enabled
+      ansible.builtin.assert:
+        that:
+          - ansible_facts.services['elastic-agent.service'].state == 'running'
+          - ansible_facts.services['elastic-agent.service'].status == 'enabled'
+
+    - name: Read the installed version
+      ansible.builtin.command: rpm -q --queryformat '%{VERSION}' elastic-agent  # noqa: command-instead-of-module - reads one package's version
+      register: test_rpm
+      changed_when: false
+
+    - name: Check the installed version is the role's default
+      ansible.builtin.assert:
+        that:
+          - test_rpm.stdout == test_default_version
+        fail_msg: "Elastic Agent {{ test_rpm.stdout }} is installed, expected {{ test_default_version }}"
+
+    - name: Check ownership and permissions
+      ansible.builtin.stat:
+        path: "{{ item.path }}"
+      register: test_stat
+      failed_when: >-
+        not test_stat.stat.exists
+        or test_stat.stat.mode != item.mode
+        or test_stat.stat.pw_name != 'root'
+        or test_stat.stat.gr_name != 'root'
+      loop:
+        - {path: "{{ test_dir }}", mode: "0700"}
+        - {path: "{{ test_dir }}/fleet-server.crt", mode: "0644"}
+        - {path: "{{ test_dir }}/fleet-server.key", mode: "0600"}
+        - {path: "{{ test_dir }}/ca.crt", mode: "0644"}
+        - {path: "{{ test_dir }}/elasticsearch-ca.crt", mode: "0644"}
+        - {path: "{{ test_dir }}/kibana-ca.crt", mode: "0644"}
+        - {path: "{{ test_dir }}/service-token", mode: "0600"}
+        - {path: /etc/elastic-agent/.ansible-fleet-server-state.json, mode: "0600"}
+      loop_control:
+        label: "{{ item.path }}"
+
+    - name: Check the key passphrase file exists exactly when the key has a passphrase
+      ansible.builtin.stat:
+        path: "{{ test_dir }}/fleet-server.key.passphrase"
+      register: test_passphrase_file
+      failed_when: >-
+        test_passphrase_file.stat.exists != (test_has_passphrase | bool)
+        or (test_passphrase_file.stat.exists and test_passphrase_file.stat.mode != '0600')
+
+    - name: Check the server key is encrypted exactly when it has a passphrase
+      ansible.builtin.command: grep -q 'BEGIN ENCRYPTED PRIVATE KEY' {{ test_dir }}/fleet-server.key
+      register: test_encrypted
+      changed_when: false
+      failed_when: (test_encrypted.rc == 0) != (test_has_passphrase | bool)
+
+    - name: Check Elastic Agent's own enrollment exists
+      ansible.builtin.stat:
+        path: /etc/elastic-agent/fleet.enc
+      register: test_fleet_enc
+      failed_when: not test_fleet_enc.stat.exists
+
+    - name: Read the enrollment record
+      ansible.builtin.slurp:
+        src: /etc/elastic-agent/.ansible-fleet-server-state.json
+      register: test_state
+
+    # The service token and the key passphrase reach enroll as files only.
+    - name: Read every process's command line
+      ansible.builtin.command: ps -eo args
+      register: test_ps
+      changed_when: false
+
+    - name: Check the enrollment record and command lines hold no secret
+      vars:
+        test_record: "{{ test_state.content | b64decode }}"
+        test_secrets: "{{ [elastic_fleet_service_token] + ([test_ssl_entry.key.passphrase] if test_has_passphrase | bool else []) }}"
+      ansible.builtin.assert:
+        that:
+          - (test_record | from_json).keys() | sort == ['fingerprint', 'salt']
+          - test_secrets | select('in', test_record) | list | length == 0
+          - test_secrets | select('in', test_ps.stdout) | list | length == 0
+        fail_msg: A secret is in the enrollment record or on a command line on {{ inventory_hostname }}.
+
+    - name: Check the repository is defined but disabled
+      ansible.builtin.command: grep -qx 'enabled = 0' /etc/yum.repos.d/elastic-agent.repo
+      changed_when: false
+
+    # Through each URL agents are given, and the host's own, checked against
+    # the test CA: every certificate has to name every Fleet Server address.
+    - name: Wait for every Fleet Server to report HEALTHY
+      ansible.builtin.uri:
+        url: "{{ item }}/api/status"
+        ca_path: "{{ test_dir }}/ca.crt"
+        status_code: [200, 503]
+      loop: "{{ ['https://' ~ inventory_hostname ~ ':8220'] + elastic_fleet_public_urls }}"
+      register: test_fleet_status
+      until: test_fleet_status.json.status | default('') == 'HEALTHY'
+      retries: 24
+      delay: 5
+
+- name: Verify the Fleet settings in Kibana
+  hosts: fleet_server
+  gather_facts: false
+  module_defaults:
+    ansible.builtin.uri:
+      url_username: "{{ test_admin_user }}"
+      url_password: "{{ test_admin_password }}"
+      force_basic_auth: true
+      ca_path: /etc/elastic-agent/fleet-server/ca.crt
+      headers:
+        kbn-xsrf: molecule
+  vars:
+    test_kibana: "{{ elastic_fleet_kibana_url }}/api/fleet"
+  tasks:
+    # Re-enrolled agents leave their old ids behind, offline once Fleet's
+    # timeout passes, so this looks for an online agent from this host.
+    - name: Wait for this Fleet Server's agent to be online in Fleet
+      ansible.builtin.uri:
+        url: "{{ test_kibana }}/agents?perPage=100&kuery={{ ('policy_id:\"' ~ elastic_fleet_policy_id ~ '\"') | urlencode }}"
+      register: test_agents
+      until: >-
+        test_agents.json['items'] | default([])
+        | selectattr('local_metadata.host.hostname', 'equalto', ansible_facts.nodename)
+        | selectattr('status', 'equalto', 'online') | list | length > 0
+      retries: 24
+      delay: 5
+
+    - name: Read the policies, the Fleet Server host and the output
+      ansible.builtin.uri:
+        url: "{{ test_kibana }}/{{ item }}"
+      loop:
+        - agent_policies/{{ elastic_fleet_policy_id }}
+        - agent_policies/agent-policy
+        - agent_policies/molecule-servers
+        - fleet_server_hosts/{{ elastic_fleet_server_host_id }}
+        - outputs/{{ elastic_fleet_output_id }}
+      register: test_fleet
+      run_once: true
+
+    - name: Read the CA certificate
+      ansible.builtin.slurp:
+        src: /etc/elastic-agent/fleet-server/ca.crt
+      register: test_ca
+      run_once: true
+
+    - name: Check the Fleet objects
+      vars:
+        test_fs_policy: "{{ test_fleet.results[0].json.item }}"
+        test_agent_policy: "{{ test_fleet.results[1].json.item }}"
+        test_molecule_policy: "{{ test_fleet.results[2].json.item }}"
+        test_host: "{{ test_fleet.results[3].json.item }}"
+        test_output: "{{ test_fleet.results[4].json.item }}"
+        test_packages: "{{ test_fleet.results[:3] | map(attribute='json.item')
+                           | map(attribute='package_policies') | map('map', attribute='package.name') | map('sort') | list }}"
+      ansible.builtin.assert:
+        that:
+          - test_packages[0] == ['fleet_server', 'system']
+          - test_packages[1] == ['system']
+          - test_packages[2] == []
+          - test_fs_policy.monitoring_enabled | sort == ['logs', 'metrics']
+          - test_agent_policy.namespace == 'default'
+          - test_molecule_policy.name == 'Molecule servers'
+          - test_molecule_policy.namespace == 'molecule'
+          - test_molecule_policy.description == 'Molecule test policy'
+          - test_molecule_policy.monitoring_enabled == ['logs']
+          - test_host.host_urls | sort == elastic_fleet_public_urls | sort
+          - test_host.is_default is true
+          - test_output.hosts == ['https://' ~ test_es_address ~ ':9200']
+          - test_output.ssl.certificate_authorities | map('trim') | list == [test_ca.content | b64decode | trim]
+        fail_msg: >-
+          Packages {{ test_packages }}; Fleet Server host {{ test_host }}; output hosts {{ test_output.hosts }}.
+      run_once: true
+
+# The facts are published by the Fleet settings tasks, so run those again: a
+# second run changes nothing (idempotence) and publishes the same tokens.
+- name: Verify the published enrollment URLs and tokens
+  hosts: fleet_server
+  gather_facts: false
+  tasks:
+    - name: Run the role's Fleet settings tasks
+      ansible.builtin.include_role:
+        name: "{{ test_role_dir }}"
+        tasks_from: fleet_settings
+
+    - name: Read each agent policy's enrollment tokens
+      ansible.builtin.uri:
+        url: >-
+          {{ elastic_fleet_kibana_url }}/api/fleet/enrollment_api_keys?perPage=100&kuery={{
+             ('policy_id:"' ~ item.id ~ '"') | urlencode }}
+        url_username: "{{ test_admin_user }}"
+        url_password: "{{ test_admin_password }}"
+        force_basic_auth: true
+        ca_path: /etc/elastic-agent/fleet-server/ca.crt
+      loop: "{{ elastic_fleet_agent_policies }}"
+      loop_control:
+        label: "{{ item.id }}"
+      register: test_keys
+      run_once: true
+
+    # Every host carries the facts, so a later play can read them from any.
+    - name: Check every host published one active token per policy, with its name
+      vars:
+        test_published: "{{ elastic_fleet_enrollment_tokens | default({}) }}"
+      ansible.builtin.assert:
+        that:
+          - elastic_fleet_enrollment_urls == elastic_fleet_public_urls
+          - test_published.keys() | sort == elastic_fleet_agent_policies | map(attribute='id') | sort
+          - >-
+            test_keys.results[item_index].json['items']
+            | selectattr('api_key', 'equalto', test_published[item.id])
+            | selectattr('active', 'equalto', true)
+            | selectattr('name', 'match', (item.token_name | default('Default') | regex_escape) ~ '( \(.*\))?$')
+            | list | length == 1
+        fail_msg: >-
+          The token published for {{ item.id }} on {{ inventory_hostname }} is not an active token named
+          {{ item.token_name | default('Default') }}: {{ test_keys.results[item_index].json['items']
+          | map(attribute='name') | list }}
+      loop: "{{ elastic_fleet_agent_policies }}"
+      loop_control:
+        label: "{{ item.id }}"
+        index_var: item_index

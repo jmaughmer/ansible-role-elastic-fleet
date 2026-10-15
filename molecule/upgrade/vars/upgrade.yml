@@ -1,0 +1,3 @@
+---
+# An existing 9.x release older than the role's default elastic_fleet_version.
+test_old_version: "9.5.3"

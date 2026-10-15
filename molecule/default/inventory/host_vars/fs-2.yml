@@ -1,0 +1,13 @@
+---
+# Overrides the group's ssl_certificates: inline PEM content, as it would come
+# from a vault. The key is the PKCS#8 encrypted copy prepare.yml made, so the
+# role installs its passphrase for enroll.
+ssl_certificates:
+  - name: fs-2
+    certificate:
+      content: "{{ lookup('ansible.builtin.file', test_pki_dir ~ '/fs-2.crt', rstrip=false) }}"
+    key:
+      content: "{{ lookup('ansible.builtin.file', test_pki_dir ~ '/fs-2.enc.key', rstrip=false) }}"
+      passphrase: "{{ test_key_passphrase }}"
+    ca:
+      content: "{{ lookup('ansible.builtin.file', test_pki_dir ~ '/ca.crt', rstrip=false) }}"

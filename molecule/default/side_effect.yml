@@ -1,0 +1,145 @@
+---
+# Runs after the idempotence check, on the converged Fleet Servers. Each step
+# applies the role with different settings and checks what happened to each
+# Fleet Server:
+#   1. an enrollment setting changes with elastic_fleet_reenroll_on_change:
+#      false: reported, but nothing is re-enrolled or restarted;
+#   2. the same change with re-enrollment: every Fleet Server is re-enrolled
+#      (a new agent id), one per batch, and the change is recorded;
+#   3. the converge settings again: re-enrolled back;
+#   4. elastic_fleet_force_restart: every Fleet Server is restarted, one per
+#      batch, and keeps its agent id.
+# verify.yml then sees the converge settings.
+- name: Record the state before any change
+  hosts: fleet_server
+  gather_facts: true
+  tasks:
+    - name: Read Elastic Agent's main PID
+      ansible.builtin.systemd_service:
+        name: elastic-agent
+      register: test_unit
+
+    - name: Read Elastic Agent's id
+      ansible.builtin.command: elastic-agent status --output json
+      register: test_agent_status
+      changed_when: false
+
+    - name: Read the enrollment record
+      ansible.builtin.slurp:
+        src: /etc/elastic-agent/.ansible-fleet-server-state.json
+      register: test_state
+
+    - name: Remember them
+      ansible.builtin.set_fact:
+        test_pid_before: "{{ test_unit.status.MainPID }}"
+        test_agent_id_before: "{{ (test_agent_status.stdout | from_json).info.id }}"
+        test_converge_state: "{{ test_state.content | b64decode | from_json }}"
+
+# Changes the enroll arguments (--fleet-server-timeout), like a new URL or
+# policy would, without changing what Fleet Server does.
+- name: Change an enrollment setting without re-enrolling
+  hosts: fleet_server
+  gather_facts: false
+  tasks:
+    - name: Apply the role
+      ansible.builtin.include_role:
+        name: "{{ test_role_dir }}"
+      vars:
+        elastic_fleet_enroll_timeout: 610
+        elastic_fleet_reenroll_on_change: false
+
+    - name: Check the change was noticed but nothing was planned
+      ansible.builtin.assert:
+        that:
+          - _ef_reenroll_required | bool
+          - not (_ef_needs_rolling | bool)
+          - hostvars[ansible_play_hosts | first]._ef_roll_batches == []
+
+    - name: Check nothing was restarted or re-enrolled
+      ansible.builtin.include_tasks: tasks/check_restart.yml
+      vars:
+        test_restarted: false
+        test_reenrolled: false
+
+- name: Change an enrollment setting
+  hosts: fleet_server
+  gather_facts: false
+  tasks:
+    - name: Apply the role
+      ansible.builtin.include_role:
+        name: "{{ test_role_dir }}"
+      vars:
+        elastic_fleet_enroll_timeout: 610
+
+    - name: Check the plan had one Fleet Server per batch
+      ansible.builtin.assert:
+        that:
+          - hostvars[ansible_play_hosts | first]._ef_roll_batches == ansible_play_hosts | batch(1) | list
+        fail_msg: "Plan: {{ hostvars[ansible_play_hosts | first]._ef_roll_batches }}"
+      run_once: true
+
+    - name: Read the enrollment record
+      ansible.builtin.slurp:
+        src: /etc/elastic-agent/.ansible-fleet-server-state.json
+      register: test_state
+
+    - name: Check the new settings were recorded with the same salt
+      vars:
+        test_record: "{{ test_state.content | b64decode | from_json }}"
+      ansible.builtin.assert:
+        that:
+          - test_record.salt == test_converge_state.salt
+          - test_record.fingerprint != test_converge_state.fingerprint
+          - "'--fleet-server-timeout=610s' in _ef_enroll_argv_fact"
+
+    # enroll restarts the running agent itself, so only the enrollment is checked.
+    - name: Check every Fleet Server was re-enrolled
+      ansible.builtin.include_tasks: tasks/check_restart.yml
+      vars:
+        test_reenrolled: true
+
+- name: Go back to the converge settings
+  hosts: fleet_server
+  gather_facts: false
+  tasks:
+    - name: Apply the role
+      ansible.builtin.include_role:
+        name: "{{ test_role_dir }}"
+
+    - name: Read the enrollment record
+      ansible.builtin.slurp:
+        src: /etc/elastic-agent/.ansible-fleet-server-state.json
+      register: test_state
+
+    - name: Check the converge settings were recorded again
+      ansible.builtin.assert:
+        that:
+          - test_state.content | b64decode | from_json == test_converge_state
+
+    - name: Check every Fleet Server was re-enrolled
+      ansible.builtin.include_tasks: tasks/check_restart.yml
+      vars:
+        test_reenrolled: true
+
+- name: Force a restart
+  hosts: fleet_server
+  gather_facts: false
+  tasks:
+    - name: Apply the role
+      ansible.builtin.include_role:
+        name: "{{ test_role_dir }}"
+      vars:
+        elastic_fleet_force_restart: true
+
+    - name: Check the plan had one Fleet Server per batch
+      ansible.builtin.assert:
+        that:
+          - hostvars[ansible_play_hosts | first]._ef_roll_batches == ansible_play_hosts | batch(1) | list
+        fail_msg: "Plan: {{ hostvars[ansible_play_hosts | first]._ef_roll_batches }}"
+      run_once: true
+
+    - name: Check every Fleet Server was restarted, not re-enrolled
+      ansible.builtin.include_tasks: tasks/check_restart.yml
+      vars:
+        test_restarted: true
+        test_reenrolled: false

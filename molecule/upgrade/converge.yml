@@ -1,0 +1,28 @@
+---
+# The default scenario's converge at the older release in vars/upgrade.yml.
+- name: Gather facts from every host
+  hosts: all
+  gather_facts: true
+  tasks: []
+
+- name: Converge at the older release
+  hosts: fleet_server
+  gather_facts: false
+  any_errors_fatal: true
+  vars_files:
+    - vars/upgrade.yml
+  tasks:
+    - name: Check the older release is older than the role's default
+      ansible.builtin.assert:
+        that:
+          - test_old_version is version(test_default_version, '<')
+        fail_msg: >-
+          test_old_version ({{ test_old_version }}) has to be older than the role's elastic_fleet_version
+          ({{ test_default_version }}); update molecule/upgrade/vars/upgrade.yml.
+      run_once: true
+
+    - name: Apply the role
+      ansible.builtin.include_role:
+        name: "{{ test_role_dir }}"
+      vars:
+        elastic_fleet_version: "{{ test_old_version }}"

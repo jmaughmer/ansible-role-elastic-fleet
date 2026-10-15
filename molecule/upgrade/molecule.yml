@@ -1,0 +1,70 @@
+---
+# The rolling upgrade: two Fleet Servers converge at an older release
+# (converge.yml), then side_effect.yml checks that
+#   - the upgrade to the role's default version takes one Fleet Server at a
+#     time: the second stops only once the first is running the new release;
+#   - going back to the older release is refused.
+#   molecule test -s upgrade
+# Fleet is managed with an API key here (host_vars/) instead of the default
+# scenario's password. Prepare and verify are the default scenario's; verify
+# expects the default version.
+role_name_check: 1
+
+dependency:
+  name: galaxy
+  options:
+    requirements-file: ${MOLECULE_SCENARIO_DIRECTORY}/../default/requirements.yml
+
+driver:
+  name: podman
+
+platforms:
+  - name: kes-u1
+    image: "docker.io/geerlingguy/docker-${MOLECULE_DISTRO:-rockylinux9}-ansible:latest"
+    pre_build_image: true
+    override_command: false
+    systemd: always
+    network: fleet_upgrade
+    groups: [elasticsearch, kibana]
+
+  - name: fs-u1
+    image: "docker.io/geerlingguy/docker-${MOLECULE_DISTRO:-rockylinux9}-ansible:latest"
+    pre_build_image: true
+    override_command: false
+    systemd: always
+    network: fleet_upgrade
+    groups: [fleet_server]
+
+  - name: fs-u2
+    image: "docker.io/geerlingguy/docker-${MOLECULE_DISTRO:-rockylinux9}-ansible:latest"
+    pre_build_image: true
+    override_command: false
+    systemd: always
+    network: fleet_upgrade
+    groups: [fleet_server]
+
+provisioner:
+  name: ansible
+  playbooks:
+    prepare: ../default/prepare.yml
+    verify: ../default/verify.yml
+  inventory:
+    links:
+      group_vars: ../default/inventory/group_vars/
+      host_vars: host_vars/
+
+verifier:
+  name: ansible
+
+scenario:
+  test_sequence:
+    - dependency
+    - destroy
+    - syntax
+    - create
+    - prepare
+    - converge
+    - idempotence
+    - side_effect
+    - verify
+    - destroy

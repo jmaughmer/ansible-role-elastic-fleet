@@ -1,0 +1,86 @@
+---
+# One case from converge.yml (test_case comes from its import): run facts and
+# preflight with the case's settings, then check the outcome on each host.
+- name: Preflight case | {{ test_case.name | default('') }}
+  hosts: fleet_server
+  gather_facts: true
+  vars_files:
+    - vars/shared.yml
+  tasks:
+    # Facts outlive the play, so clear the previous case's outcome.
+    - name: Reset the outcome | {{ test_case.name }}
+      ansible.builtin.set_fact:
+        test_failed: false
+        test_failed_task: ""
+        test_failure: ""
+        test_failure_raw: ""
+
+    - name: Run the role's preflight | {{ test_case.name }}
+      vars:
+        elastic_fleet_version: "{{ test_case.version | default(test_version) }}"
+        elastic_fleet_supported_distributions: "{{ test_case.distributions | default(['RedHat', 'AlmaLinux', 'Rocky']) }}"
+        elastic_fleet_group: "{{ test_case.group | default('fleet_server') }}"
+        elastic_fleet_repo_source: "{{ test_case.repo_source | default('elastic') }}"
+        elastic_fleet_satellite_repo_id: "{{ test_case.satellite_repo_id | default('') }}"
+        elastic_fleet_satellite_repo_overrides: "{{ test_case.satellite_repo_overrides | default({}) }}"
+        elastic_fleet_url: "{{ test_case.url | default('https://' ~ inventory_hostname ~ ':8220') }}"
+        elastic_fleet_public_urls: "{{ test_case.public_urls | default(test_public_urls) }}"
+        elastic_fleet_client_auth: "{{ test_case.client_auth | default('none') }}"
+        elastic_fleet_port: "{{ test_case.port | default(8220) }}"
+        elastic_fleet_restart_batch_size: "{{ test_case.batch_size | default(1) }}"
+        elastic_fleet_elasticsearch_hosts: "{{ test_case.es_hosts | default(['https://192.0.2.10:9200']) }}"
+        elastic_fleet_service_token: "{{ test_case.token | default(test_token) }}"
+        elastic_fleet_kibana_url: https://192.0.2.20:5601
+        elastic_fleet_kibana_api_key: "{{ test_case.api_key | default('') }}"
+        elastic_fleet_kibana_username: elastic
+        elastic_fleet_kibana_password: "{{ test_case.password | default(test_password) }}"
+        elastic_fleet_agent_policies: "{{ test_case.agent_policies | default(test_agent_policies) }}"
+        ssl_certificates: "{{ test_case.ssl_certificates | default(test_ssl_certificates) }}"
+      block:
+        - name: Gather the role's facts | {{ test_case.name }}
+          ansible.builtin.include_role:
+            name: "{{ test_role }}"
+            tasks_from: facts
+
+        - name: Run the preflight checks | {{ test_case.name }}
+          ansible.builtin.include_role:
+            name: "{{ test_role }}"
+            tasks_from: preflight
+
+      rescue:
+        # A run_once check fails every host, but only the host it ran on gets
+        # its result; the others may see no failed result at all.
+        - name: Record the failure | {{ test_case.name }}
+          ansible.builtin.set_fact:
+            test_failed: true
+            test_failed_task: "{{ ansible_failed_task.name | default('') }}"
+            test_failure: >-
+              {{ ([ansible_failed_result | default({})] + (ansible_failed_result.results | default([])))
+                 | selectattr('msg', 'defined') | map(attribute='msg') | join(' ') }}
+            test_failure_raw: "{{ ansible_failed_result | default({}) | to_json }}"
+
+    # Checks marked no_log hide their message, so the failed task's name says
+    # which check refused the settings. For a run_once check, that is only
+    # known on the first host.
+    - name: Check the outcome | {{ test_case.name }}
+      vars:
+        test_should_fail: "{{ test_case.task | length > 0 and inventory_hostname in (test_case.fail_on | default(ansible_play_hosts_all)) }}"
+        test_check_detail: "{{ not (test_case.run_once | default(false)) or inventory_hostname == test_first }}"
+        test_leaked: "{{ test_secrets | select('in', test_failure_raw) | list }}"
+      ansible.builtin.assert:
+        that:
+          - test_failed == test_should_fail
+          - not test_failed or not test_check_detail or test_failed_task == 'Preflight | ' ~ test_case.task
+          - not test_failed or not test_check_detail or test_failure is search(test_case.expect | default(''))
+          - test_leaked | length == 0
+        fail_msg: >-
+          Case '{{ test_case.name }}' on {{ inventory_hostname }}: expected
+          {{ ('a failure in "Preflight | ' ~ test_case.task ~ '"') if test_should_fail else 'no failure' }},
+          got {{ ('a failure in "' ~ test_failed_task ~ '": ' ~ test_failure) if test_failed else 'none' }}.
+          {{ 'The failure printed a secret.' if test_leaked | length > 0 else '' }}
+        quiet: true
+
+    # A run_once failure leaves the other hosts marked failed although their
+    # rescue ran; without this they would sit out every later case.
+    - name: Bring every host back for the next case | {{ test_case.name }}
+      ansible.builtin.meta: clear_host_errors

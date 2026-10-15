@@ -1,0 +1,41 @@
+---
+# Included after each change in side_effect.yml: Elastic Agent is running, was
+# restarted (a new main PID) exactly when test_restarted says so, and was
+# re-enrolled (a new agent id) exactly when test_reenrolled says so. Either is
+# skipped when not given. Both are then remembered for the next step.
+- name: Read Elastic Agent's main PID
+  ansible.builtin.systemd_service:
+    name: elastic-agent
+  register: test_unit
+
+- name: Read Elastic Agent's id
+  ansible.builtin.command: elastic-agent status --output json
+  register: test_agent_status
+  changed_when: false
+
+- name: Check Elastic Agent's PID
+  ansible.builtin.assert:
+    that:
+      - test_unit.status.ActiveState == 'active'
+      - test_unit.status.MainPID | int > 0
+      - test_restarted is not defined
+        or (test_unit.status.MainPID | int != test_pid_before | int) == test_restarted
+    fail_msg: >-
+      On {{ inventory_hostname }} Elastic Agent's PID went from {{ test_pid_before }} to
+      {{ test_unit.status.MainPID }} ({{ test_unit.status.ActiveState }}); expected
+      {{ 'a restart' if test_restarted else 'the same process' }}.
+
+- name: Check Elastic Agent's id
+  vars:
+    test_agent_id: "{{ (test_agent_status.stdout | from_json).info.id }}"
+  ansible.builtin.assert:
+    that:
+      - test_reenrolled is not defined or (test_agent_id != test_agent_id_before) == test_reenrolled
+    fail_msg: >-
+      On {{ inventory_hostname }} the agent id went from {{ test_agent_id_before }} to {{ test_agent_id }};
+      expected {{ 'a new enrollment' if test_reenrolled else 'the same one' }}.
+
+- name: Remember the PID and the agent id
+  ansible.builtin.set_fact:
+    test_pid_before: "{{ test_unit.status.MainPID }}"
+    test_agent_id_before: "{{ (test_agent_status.stdout | from_json).info.id }}"

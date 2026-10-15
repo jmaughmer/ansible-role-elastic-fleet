@@ -1,0 +1,81 @@
+---
+# Runs on the Fleet Servers converged at test_old_version (vars/upgrade.yml).
+- name: Gather facts from every host
+  hosts: all
+  gather_facts: true
+  tasks: []
+
+- name: Upgrade every Fleet Server
+  hosts: fleet_server
+  gather_facts: false
+  tasks:
+    - name: Apply the role
+      ansible.builtin.include_role:
+        name: "{{ test_role_dir }}"
+
+    - name: Check the plan had one Fleet Server per batch
+      ansible.builtin.assert:
+        that:
+          - hostvars[ansible_play_hosts | first]._ef_roll_batches == ansible_play_hosts | batch(1) | list
+        fail_msg: "Plan: {{ hostvars[ansible_play_hosts | first]._ef_roll_batches }}"
+      run_once: true
+
+    - name: Read the installed version
+      ansible.builtin.command: rpm -q --queryformat '%{VERSION}' elastic-agent  # noqa: command-instead-of-module - reads one package's version
+      register: test_rpm
+      changed_when: false
+      failed_when: test_rpm.stdout != test_default_version
+
+    # Monotonic timestamps (microseconds): the containers share one kernel,
+    # so they compare across hosts.
+    - name: Read when Elastic Agent last stopped and started
+      ansible.builtin.systemd_service:
+        name: elastic-agent
+      register: test_unit
+
+    - name: Check the second Fleet Server stopped only after the first was back
+      vars:
+        test_first: "{{ ansible_play_hosts[0] }}"
+        test_second: "{{ ansible_play_hosts[1] }}"
+        test_first_started: "{{ hostvars[test_first].test_unit.status.ActiveEnterTimestampMonotonic | int }}"
+        test_second_stopped: "{{ hostvars[test_second].test_unit.status.InactiveEnterTimestampMonotonic | int }}"
+      ansible.builtin.assert:
+        that:
+          - test_first_started | int > 0
+          - test_first_started | int < test_second_stopped | int
+        fail_msg: >-
+          {{ test_first }} started at {{ test_first_started }}, {{ test_second }} stopped at
+          {{ test_second_stopped }}.
+      run_once: true
+
+- name: Refuse a downgrade
+  hosts: fleet_server
+  gather_facts: false
+  vars_files:
+    - vars/upgrade.yml
+  tasks:
+    - name: Go back to the older release
+      block:
+        - name: Apply the role
+          ansible.builtin.include_role:
+            name: "{{ test_role_dir }}"
+          vars:
+            elastic_fleet_version: "{{ test_old_version }}"
+
+        - name: Fail, since the role went ahead
+          ansible.builtin.fail:
+            msg: The role accepted a downgrade.
+
+      rescue:
+        - name: Check preflight refused it
+          ansible.builtin.assert:
+            that:
+              - ansible_failed_task.name == 'Preflight | Verify Elastic Agent version'
+              - ansible_failed_result.msg is search('downgrades and major upgrades are not supported')
+            fail_msg: "Failed at '{{ ansible_failed_task.name }}': {{ ansible_failed_result.msg | default('') }}"
+
+    - name: Read the installed version
+      ansible.builtin.command: rpm -q --queryformat '%{VERSION}' elastic-agent  # noqa: command-instead-of-module - reads one package's version
+      register: test_rpm
+      changed_when: false
+      failed_when: test_rpm.stdout != test_default_version
