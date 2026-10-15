@@ -35,6 +35,10 @@
           - test_rpm.stdout == test_default_version
         fail_msg: "Elastic Agent {{ test_rpm.stdout }} is installed, expected {{ test_default_version }}"
 
+    - name: Check the servers flavor, which carries Fleet Server, is installed
+      ansible.builtin.command: grep -qx servers /var/lib/elastic-agent/.flavor
+      changed_when: false
+
     - name: Check ownership and permissions
       ansible.builtin.stat:
         path: "{{ item.path }}"

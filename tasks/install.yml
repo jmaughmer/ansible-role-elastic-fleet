@@ -10,6 +10,10 @@
 #
 # Package downloads run as async jobs so a dropped SSH session does not abort
 # them, and are retried if the download itself fails.
+#
+# The 9.x package installs the "basic" flavor, which lacks Fleet Server, unless
+# ELASTIC_AGENT_FLAVOR says otherwise on the first install. The flavor is then
+# kept in /var/lib/elastic-agent/.flavor for later upgrades.
 - name: Install | Install Elastic Agent package
   ansible.builtin.dnf:
     name: "elastic-agent-{{ elastic_fleet_version }}"
@@ -17,6 +21,8 @@
     allow_downgrade: false
     lock_timeout: "{{ elastic_fleet_dnf_lock_timeout }}"
     enablerepo: "{{ _ef_package_repos if _ef_package_repos | length > 0 else omit }}"
+  environment:
+    ELASTIC_AGENT_FLAVOR: servers
   async: "{{ 0 if ansible_check_mode else elastic_fleet_download_async_timeout }}"
   poll: "{{ elastic_fleet_download_async_poll }}"
   register: _ef_package_install
