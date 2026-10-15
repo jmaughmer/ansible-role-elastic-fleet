@@ -180,6 +180,33 @@ elastic_fleet_output_name: default
 elastic_fleet_output_hosts: "{{ elastic_fleet_elasticsearch_hosts }}"
 
 # =============================================================================
+# Agent policies and enrollment tokens
+# =============================================================================
+# Policies ordinary Elastic Agents enroll into, managed with the Fleet settings
+# (elastic_fleet_manage_fleet_settings). Each one is created when missing; an
+# existing policy is left as it is (edit it in Fleet). Keys per entry:
+#   id                  required; must differ from elastic_fleet_policy_id
+#   name                required
+#   namespace           default elastic_fleet_policy_namespace
+#   description         default elastic_fleet_agent_policy_description
+#   system_monitoring   add the System integration on creation (default true)
+#   monitoring_enabled  agent self-monitoring: [logs, metrics] by default
+#   token_name          enrollment token to use or create (default
+#                       elastic_fleet_enrollment_token_name)
+# The role publishes the URLs and one enrollment token per policy as the facts
+# elastic_fleet_enrollment_urls and elastic_fleet_enrollment_tokens
+# ({policy id: token}) for ansible-role-elastic-agent. Set to [] to manage none.
+elastic_fleet_agent_policies:
+  - id: agent-policy
+    name: Agent Policy
+elastic_fleet_agent_policy_description: "Managed by Ansible (ansible-role-elastic-fleet)"
+
+# Enrollment token looked up in each agent policy, by name, and created when the
+# policy has no active token of that name. Fleet creates one named "Default"
+# with every new policy, so the default reuses it.
+elastic_fleet_enrollment_token_name: Default
+
+# =============================================================================
 # Operation
 # =============================================================================
 elastic_fleet_manage_firewall: true
