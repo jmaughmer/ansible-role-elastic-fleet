@@ -1,0 +1,47 @@
+---
+# Role settings shared by every scenario that installs Fleet Server. fs-2 takes
+# its TLS material inline (host_vars/fs-2.yml); the upgrade scenario manages
+# Fleet with an API key instead of a password.
+
+elastic_fleet_elasticsearch_hosts: ["https://{{ test_es_address }}:9200"]
+elastic_fleet_service_token: "{{ lookup('ansible.builtin.file', test_pki_dir ~ '/fleet_service_token') }}"
+
+elastic_fleet_kibana_url: "https://{{ test_es_address }}:5601"
+elastic_fleet_kibana_username: "{{ test_admin_user }}"
+elastic_fleet_kibana_password: "{{ test_admin_password }}"
+
+# Every Fleet Server by address; each certificate names all of them.
+elastic_fleet_public_urls: "{{ test_fleet_addresses | map('regex_replace', '^(.*)$', 'https://\\1:8220') | list }}"
+
+# Fleet's own default output points at http://localhost:9200, which Fleet
+# Server cannot reach from these hosts.
+elastic_fleet_manage_output: true
+
+# The default policy, and one with every per-policy setting changed
+elastic_fleet_agent_policies:
+  - id: agent-policy
+    name: Agent Policy
+  - id: molecule-servers
+    name: Molecule servers
+    namespace: molecule
+    description: Molecule test policy
+    system_monitoring: false
+    monitoring_enabled: [logs]
+    token_name: molecule
+
+# Files already on the host, as ansible-role-elastic-tls leaves them;
+# prepare.yml puts them there.
+ssl_certificates:
+  - name: "{{ inventory_hostname }}"
+    certificate:
+      path: /etc/pki/molecule/fleet.crt
+    key:
+      path: /etc/pki/molecule/fleet.key
+    ca:
+      path: /etc/pki/molecule/ca.crt
+
+# Show what was sent if a run fails.
+elastic_fleet_no_log: false
+# Retry less: a failure in a container is not a flaky satellite link.
+elastic_fleet_task_retries: 2
+elastic_fleet_task_delay: 5

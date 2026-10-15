@@ -1,0 +1,72 @@
+---
+# Three systemd containers (rootless Podman is fine) on one network:
+#   kes-1       Elasticsearch (single node) and Kibana, installed by prepare.yml
+#   fs-1, fs-2  the inventory group "fleet_server", which the role is applied to
+# fs-1 takes its TLS material from files on the host, as ansible-role-elastic-tls
+# leaves them; fs-2 takes it inline, as from a vault, with an encrypted key
+# (host_vars/fs-2.yml).
+# MOLECULE_DISTRO picks the EL release (default rockylinux9; also
+# rockylinux10) — see the README's "Testing" section. The playbooks and
+# inventory here are shared with the other scenarios.
+#
+# Inside containers firewalld isn't installed, so this exercises the role's
+# skip path for it.
+#
+# The sequence adds side_effect.yml (re-enrollment and restarts) before verify.
+# There is no `check` step: the role's Fleet API calls are skipped in check
+# mode, so a check-mode run cannot read Kibana's version.
+role_name_check: 1
+
+dependency:
+  name: galaxy   # installs requirements.yml next to this file
+
+driver:
+  name: podman
+
+platforms:
+  - name: kes-1
+    image: "docker.io/geerlingguy/docker-${MOLECULE_DISTRO:-rockylinux9}-ansible:latest"
+    pre_build_image: true
+    override_command: false   # keep the image's own CMD: systemd as PID 1
+    systemd: always
+    network: fleet_molecule   # created by the driver from the first platform
+    groups: [elasticsearch, kibana]
+
+  - name: fs-1
+    image: "docker.io/geerlingguy/docker-${MOLECULE_DISTRO:-rockylinux9}-ansible:latest"
+    pre_build_image: true
+    override_command: false
+    systemd: always
+    network: fleet_molecule
+    groups: [fleet_server]
+
+  - name: fs-2
+    image: "docker.io/geerlingguy/docker-${MOLECULE_DISTRO:-rockylinux9}-ansible:latest"
+    pre_build_image: true
+    override_command: false
+    systemd: always
+    network: fleet_molecule
+    groups: [fleet_server]
+
+provisioner:
+  name: ansible
+  inventory:
+    links:
+      group_vars: inventory/group_vars/
+      host_vars: inventory/host_vars/
+
+verifier:
+  name: ansible
+
+scenario:
+  test_sequence:
+    - dependency
+    - destroy
+    - syntax
+    - create
+    - prepare
+    - converge
+    - idempotence
+    - side_effect
+    - verify
+    - destroy

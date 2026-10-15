@@ -1,0 +1,33 @@
+---
+# Shared by every scenario that installs Fleet Server (inventory links in each
+# molecule.yml): Elasticsearch and Kibana on one host, in the groups
+# "elasticsearch" and "kibana", and the Fleet Servers in "fleet_server".
+
+test_role_dir: "{{ lookup('env', 'MOLECULE_PROJECT_DIRECTORY') }}"
+# The role's own elastic_fleet_version. Elasticsearch and Kibana are installed at
+# that version and verify.yml expects Fleet Server to end up at it, so the tests
+# follow the default.
+test_role_defaults: "{{ lookup('ansible.builtin.file', test_role_dir ~ '/defaults/main.yml') | from_yaml }}"
+test_default_version: "{{ test_role_defaults.elastic_fleet_version }}"
+# Ids of the Fleet objects the role manages, for verify.yml, which runs
+# outside the role and so does not see its defaults.
+test_policy_id: "{{ test_role_defaults.elastic_fleet_policy_id }}"
+test_server_host_id: "{{ test_role_defaults.elastic_fleet_server_host_id }}"
+test_output_id: "{{ test_role_defaults.elastic_fleet_output_id }}"
+
+test_es_host: "{{ groups['elasticsearch'] | first }}"
+# By address rather than by name: the containers are not guaranteed to resolve
+# each other's names. Every certificate carries the addresses it is reached on.
+test_es_address: "{{ hostvars[test_es_host].ansible_facts.default_ipv4.address }}"
+test_fleet_addresses: "{{ groups['fleet_server'] | map('extract', hostvars, ['ansible_facts', 'default_ipv4', 'address']) | list }}"
+
+# Written on the controller by prepare.yml: the test CA, each host's certificate
+# and key (also encrypted with test_key_passphrase), the service tokens created
+# on the Elasticsearch node, and an API key for Kibana.
+test_pki_dir: "{{ lookup('env', 'MOLECULE_EPHEMERAL_DIRECTORY') }}/pki"
+test_key_passphrase: molecule-key-passphrase
+
+# Superuser in Elasticsearch's file realm. Used by prepare.yml and verify.yml,
+# and as the Kibana user that manages Fleet.
+test_admin_user: molecule_admin
+test_admin_password: molecule-admin-password

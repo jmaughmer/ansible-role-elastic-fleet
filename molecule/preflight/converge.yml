@@ -1,0 +1,245 @@
+---
+# Each case runs the role's facts and preflight tasks (nothing is installed)
+# and states which check must refuse it, on which hosts, and how:
+#   task     name of the preflight task that must fail, without its
+#            "Preflight | " prefix; empty means every check must pass
+#   expect   regex the failure message has to match (checks marked no_log
+#            hide their message, so those cases name only the task)
+#   fail_on  hosts that must fail (default: every host)
+#   run_once true for a check that runs once for all hosts: every host must
+#            fail, but only the first knows which task failed and why
+# Every failure is also checked for the secrets in vars/shared.yml, which must
+# never be printed.
+#
+# Each case is a play of its own. Some checks compare the hosts with each
+# other, so both hosts have to run the case together; a play guarantees that,
+# a looped include does not once one host has failed and the other not.
+
+- name: Valid settings pass
+  ansible.builtin.import_playbook: case.yml
+  vars:
+    test_case:
+      name: valid settings pass
+      task: ""
+
+- name: Unsupported distribution
+  ansible.builtin.import_playbook: case.yml
+  vars:
+    test_case:
+      name: distribution not in elastic_fleet_supported_distributions
+      distributions: [RedHat]
+      task: Verify operating system is supported
+      expect: Unsupported platform
+
+- name: Host outside elastic_fleet_group
+  ansible.builtin.import_playbook: case.yml
+  vars:
+    test_case:
+      name: host outside elastic_fleet_group
+      group: other
+      fail_on: "{{ groups['fleet_server'] | difference(groups['other']) }}"
+      task: Verify host is a member of the Fleet Server group
+      expect: is not in inventory group 'other'
+
+- name: Version that is not exact
+  ansible.builtin.import_playbook: case.yml
+  vars:
+    test_case:
+      name: version without a patch number
+      version: "9.5"
+      task: Verify Elastic Agent version
+      expect: must be an exact 9.x.y release
+
+- name: Another major version
+  ansible.builtin.import_playbook: case.yml
+  vars:
+    test_case:
+      name: an 8.x release
+      version: "8.19.3"
+      task: Verify Elastic Agent version
+      expect: must be an exact 9.x.y release
+
+- name: Unknown package source
+  ansible.builtin.import_playbook: case.yml
+  vars:
+    test_case:
+      name: unknown elastic_fleet_repo_source
+      repo_source: local
+      task: Verify package source settings
+      expect: elastic_fleet_repo_source must be elastic, satellite or none
+
+- name: Satellite without a repository id
+  ansible.builtin.import_playbook: case.yml
+  vars:
+    test_case:
+      name: satellite without elastic_fleet_satellite_repo_id
+      repo_source: satellite
+      task: Verify package source settings
+      expect: Satellite needs
+
+- name: Satellite override of baseurl
+  ansible.builtin.import_playbook: case.yml
+  vars:
+    test_case:
+      name: satellite content override that sets baseurl
+      repo_source: satellite
+      satellite_repo_id: ACME_Elastic_Elastic_9_x
+      satellite_repo_overrides: {baseurl: "https://mirror.example.com/"}
+      task: Verify package source settings
+      expect: cannot set enabled, baseurl or name
+
+- name: Fleet Server URL over http
+  ansible.builtin.import_playbook: case.yml
+  vars:
+    test_case:
+      name: elastic_fleet_url over http
+      url: "http://{{ inventory_hostname }}:8220"
+      task: Verify Fleet Server settings
+      expect: must be https:// URLs
+
+- name: No public URLs
+  ansible.builtin.import_playbook: case.yml
+  vars:
+    test_case:
+      name: no elastic_fleet_public_urls
+      public_urls: []
+      task: Verify Fleet Server settings
+      expect: must be https:// URLs
+
+- name: Unknown client authentication
+  ansible.builtin.import_playbook: case.yml
+  vars:
+    test_case:
+      name: elastic_fleet_client_auth that is not none, optional or required
+      client_auth: always
+      task: Verify Fleet Server settings
+      expect: elastic_fleet_client_auth must be one of none, optional, required
+
+- name: Port out of range
+  ansible.builtin.import_playbook: case.yml
+  vars:
+    test_case:
+      name: port out of range
+      port: 70000
+      task: Verify Fleet Server settings
+      expect: a valid port
+
+- name: Empty restart batches
+  ansible.builtin.import_playbook: case.yml
+  vars:
+    test_case:
+      name: restart batch size 0
+      batch_size: 0
+      task: Verify Fleet Server settings
+      expect: restart_batch_size at least 1
+
+- name: No Elasticsearch hosts
+  ansible.builtin.import_playbook: case.yml
+  vars:
+    test_case:
+      name: no Elasticsearch hosts
+      es_hosts: []
+      task: Verify Elasticsearch settings
+
+- name: Missing service token
+  ansible.builtin.import_playbook: case.yml
+  vars:
+    test_case:
+      name: no service token
+      token: ""
+      task: Verify Elasticsearch settings
+
+- name: No Kibana credentials
+  ansible.builtin.import_playbook: case.yml
+  vars:
+    test_case:
+      name: neither an API key nor a password for Kibana
+      password: ""
+      task: Verify Kibana settings
+
+- name: API key instead of a password
+  ansible.builtin.import_playbook: case.yml
+  vars:
+    test_case:
+      name: API key without a password passes
+      password: ""
+      api_key: "{{ test_api_key }}"
+      task: ""
+
+- name: Agent policy without a name
+  ansible.builtin.import_playbook: case.yml
+  vars:
+    test_case:
+      name: agent policy without a name
+      agent_policies: [{id: agent-policy}]
+      task: Verify agent policies
+      expect: must be a list of mappings
+
+- name: Duplicate agent policy ids
+  ansible.builtin.import_playbook: case.yml
+  vars:
+    test_case:
+      name: two agent policies with one id
+      agent_policies: [{id: agent-policy, name: One}, {id: agent-policy, name: Two}]
+      task: Verify agent policies
+      expect: unique id
+
+- name: Agent policy id with a space
+  ansible.builtin.import_playbook: case.yml
+  vars:
+    test_case:
+      name: agent policy id with a space
+      agent_policies: [{id: agent policy, name: Agent Policy}]
+      task: Verify agent policies
+      expect: unique id
+
+- name: Agent policy using the Fleet Server policy
+  ansible.builtin.import_playbook: case.yml
+  vars:
+    test_case:
+      name: agent policy with the Fleet Server policy id
+      agent_policies: [{id: fleet-server-policy, name: Agent Policy}]
+      task: Verify agent policies
+      expect: none using the Fleet Server policy id 'fleet-server-policy'
+
+- name: Unknown monitoring type
+  ansible.builtin.import_playbook: case.yml
+  vars:
+    test_case:
+      name: agent policy monitoring traces
+      agent_policies: [{id: agent-policy, name: Agent Policy, monitoring_enabled: [traces]}]
+      task: Verify agent policies
+      expect: a subset of \[logs, metrics\]
+
+- name: Fleet settings that differ
+  ansible.builtin.import_playbook: case.yml
+  vars:
+    test_case:
+      name: public URLs that differ between Fleet Servers
+      public_urls: ["https://{{ inventory_hostname }}:8220"]
+      run_once: true
+      task: Verify every Fleet Server expects the same Fleet settings
+      expect: Fleet Servers in this play disagree
+
+- name: No CA for Elasticsearch
+  ansible.builtin.import_playbook: case.yml
+  vars:
+    test_case:
+      name: no CA for Elasticsearch
+      ssl_certificates:
+        - name: "{{ inventory_hostname }}"
+          certificate: {path: /etc/pki/molecule/fleet.crt}
+          key: {path: /etc/pki/molecule/fleet.key}
+      task: Verify TLS material
+
+- name: No server certificate
+  ansible.builtin.import_playbook: case.yml
+  vars:
+    test_case:
+      name: no certificate entry for the host
+      ssl_certificates:
+        - name: some-other-host
+          certificate: {path: /etc/pki/molecule/fleet.crt}
+          key: {path: /etc/pki/molecule/fleet.key}
+          ca: {path: /etc/pki/molecule/ca.crt}
+      task: Verify TLS material

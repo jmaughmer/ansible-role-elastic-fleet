@@ -23,7 +23,7 @@
       retries: "{{ elastic_fleet_task_retries }}"
       delay: "{{ elastic_fleet_task_delay }}"
 
-    # enroll restarts a running agent itself, and waits for it.
+    # enroll_host.yml stops the agent, enrolls it and starts it again.
     - name: Rolling | Re-enroll Fleet Servers whose enrollment settings changed
       ansible.builtin.include_tasks: enroll_host.yml
       loop: "{{ _ef_batch_reenroll }}"

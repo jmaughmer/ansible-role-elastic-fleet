@@ -1,0 +1,5 @@
+---
+# Overrides the shared group_vars (../default/inventory/group_vars/fleet_server.yml):
+# the Fleet API is called with the API key prepare.yml created, not a password.
+elastic_fleet_kibana_api_key: "{{ lookup('ansible.builtin.file', test_pki_dir ~ '/kibana_api_key') }}"
+elastic_fleet_kibana_password: ""

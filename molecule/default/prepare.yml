@@ -1,0 +1,361 @@
+---
+# Shared by every scenario that installs Fleet Server. Runs once, after the
+# containers are created (Molecule connects as root):
+#   - every host gets iproute (without it there are no network facts),
+#     openssl (the role checks keys and certificates with it) and ps;
+#   - a test CA issues a certificate for every host, made on the Elasticsearch
+#     node and copied to the controller (test_pki_dir) and to each Fleet Server
+#     (/etc/pki/molecule/). Each Fleet Server certificate names every Fleet
+#     Server address, since those are the URLs agents are given;
+#   - Elasticsearch runs as a single node with TLS on HTTP, a file-realm
+#     superuser, and service account tokens for elastic/kibana and
+#     elastic/fleet-server;
+#   - Kibana runs on the same host with TLS, and an API key is made for the
+#     scenarios that manage Fleet with one.
+- name: Install what the role and the tests need
+  hosts: all
+  gather_facts: false
+  tasks:
+    - name: Install iproute, openssl and ps
+      ansible.builtin.dnf:
+        name: [iproute, openssl, procps-ng]
+        state: present
+
+- name: Gather network facts
+  hosts: all
+  gather_facts: true
+  tasks: []
+
+- name: Make the test CA and certificates
+  hosts: elasticsearch
+  gather_facts: false
+  vars:
+    test_ca_dir: /root/molecule-pki
+    test_cert_hosts: "{{ groups['elasticsearch'] + groups['fleet_server'] }}"
+  tasks:
+    - name: Create the CA directory
+      ansible.builtin.file:
+        path: "{{ test_ca_dir }}"
+        state: directory
+        mode: "0700"
+
+    - name: Create the CA
+      ansible.builtin.command:
+        argv:
+          - openssl
+          - req
+          - -x509
+          - -newkey
+          - rsa:2048
+          - -noenc
+          - -days
+          - "30"
+          - -subj
+          - /CN=Molecule test CA
+          - -addext
+          - basicConstraints=critical,CA:TRUE
+          - -addext
+          - keyUsage=critical,keyCertSign,cRLSign
+          - -keyout
+          - ca.key
+          - -out
+          - ca.crt
+        chdir: "{{ test_ca_dir }}"
+        creates: "{{ test_ca_dir }}/ca.crt"
+
+    # Each host by name and address, and as localhost: the role enrolls and
+    # checks Fleet Server at https://<inventory_hostname>:8220 on the host
+    # itself. A Fleet Server's certificate also names every other Fleet
+    # Server's address (elastic_fleet_public_urls).
+    # <host>.enc.key is the same key, encrypted in PKCS#8 (readable in FIPS mode).
+    - name: Issue a certificate for every host
+      ansible.builtin.shell:
+        cmd: |
+          set -euo pipefail
+          openssl req -newkey rsa:2048 -noenc -subj "/CN=$NAME" -keyout "$NAME.key" -out "$NAME.csr"
+          printf '%s\n' "subjectAltName=$SAN" basicConstraints=CA:FALSE \
+            keyUsage=critical,digitalSignature,keyEncipherment extendedKeyUsage=serverAuth,clientAuth > "$NAME.ext"
+          openssl x509 -req -in "$NAME.csr" -CA ca.crt -CAkey ca.key -CAcreateserial -days 30 -sha256 \
+            -extfile "$NAME.ext" -out "$NAME.crt"
+          openssl pkcs8 -topk8 -v2 aes-256-cbc -in "$NAME.key" -passout env:PASSPHRASE -out "$NAME.enc.key"
+        chdir: "{{ test_ca_dir }}"
+        creates: "{{ test_ca_dir }}/{{ item }}.crt"
+        executable: /bin/bash
+      environment:
+        NAME: "{{ item }}"
+        SAN: >-
+          {{ (['DNS:' ~ item, 'DNS:localhost', 'IP:127.0.0.1', 'IP:' ~ hostvars[item].ansible_facts.default_ipv4.address]
+              + ((test_fleet_addresses | map('regex_replace', '^', 'IP:') | list) if item in groups['fleet_server'] else []))
+             | unique | join(',') }}
+        PASSPHRASE: "{{ test_key_passphrase }}"
+      loop: "{{ test_cert_hosts }}"
+
+    - name: Copy the CA, certificates and keys to the controller
+      ansible.builtin.fetch:
+        src: "{{ test_ca_dir }}/{{ item }}"
+        dest: "{{ test_pki_dir }}/"
+        flat: true
+      loop: "{{ ['ca.crt'] + (test_cert_hosts | product(['.crt', '.key', '.enc.key']) | map('join') | list) }}"
+
+- name: Install the test certificates on the Fleet Servers
+  hosts: fleet_server
+  gather_facts: false
+  tasks:
+    - name: Create /etc/pki/molecule
+      ansible.builtin.file:
+        path: /etc/pki/molecule
+        state: directory
+        mode: "0755"
+
+    - name: Copy the CA, and this host's certificate and key
+      ansible.builtin.copy:
+        src: "{{ test_pki_dir }}/{{ item.src }}"
+        dest: "/etc/pki/molecule/{{ item.dest }}"
+        mode: "{{ item.mode }}"
+      loop:
+        - {src: ca.crt, dest: ca.crt, mode: "0644"}
+        - {src: "{{ inventory_hostname }}.crt", dest: fleet.crt, mode: "0644"}
+        - {src: "{{ inventory_hostname }}.key", dest: fleet.key, mode: "0600"}
+
+- name: Install and start Elasticsearch
+  hosts: elasticsearch
+  gather_facts: false
+  vars:
+    test_es_conf: /etc/elasticsearch
+    test_es_bin: /usr/share/elasticsearch/bin
+  tasks:
+    - name: Import the Elastic GPG key
+      ansible.builtin.rpm_key:
+        key: https://artifacts.elastic.co/GPG-KEY-elasticsearch
+        state: present
+
+    - name: Add the Elastic repository
+      ansible.builtin.yum_repository:
+        name: elasticsearch-molecule
+        description: Elastic packages (Molecule)
+        baseurl: "https://artifacts.elastic.co/packages/{{ test_default_version.split('.')[0] }}.x/yum"
+        gpgcheck: true
+        gpgkey: https://artifacts.elastic.co/GPG-KEY-elasticsearch
+        enabled: true
+
+    - name: Install Elasticsearch and Kibana at the role's default Fleet Server version
+      ansible.builtin.dnf:
+        name:
+          - "elasticsearch-{{ test_default_version }}"
+          - "kibana-{{ test_default_version }}"
+        state: present
+
+    - name: Create the certificate directory
+      ansible.builtin.file:
+        path: "{{ test_es_conf }}/molecule-certs"
+        state: directory
+        owner: root
+        group: elasticsearch
+        mode: "0750"
+
+    - name: Install the HTTP certificate, key and CA
+      ansible.builtin.copy:
+        src: "/root/molecule-pki/{{ item.src }}"
+        dest: "{{ test_es_conf }}/molecule-certs/{{ item.dest }}"
+        remote_src: true
+        owner: root
+        group: elasticsearch
+        mode: "0640"
+      loop:
+        - {src: "{{ inventory_hostname }}.crt", dest: http.crt}
+        - {src: "{{ inventory_hostname }}.key", dest: http.key}
+        - {src: ca.crt, dest: ca.crt}
+
+    # Replaces what the package's security auto-configuration wrote.
+    # single-node discovery also skips the bootstrap checks.
+    - name: Configure Elasticsearch
+      ansible.builtin.copy:
+        dest: "{{ test_es_conf }}/elasticsearch.yml"
+        owner: root
+        group: elasticsearch
+        mode: "0660"
+        content: |
+          cluster.name: molecule
+          node.name: {{ inventory_hostname }}
+          path.data: /var/lib/elasticsearch
+          path.logs: /var/log/elasticsearch
+          network.host: 0.0.0.0
+          discovery.type: single-node
+          xpack.ml.enabled: false
+          xpack.security.enabled: true
+          xpack.security.http.ssl.enabled: true
+          xpack.security.http.ssl.certificate: molecule-certs/http.crt
+          xpack.security.http.ssl.key: molecule-certs/http.key
+          xpack.security.http.ssl.certificate_authorities: [molecule-certs/ca.crt]
+
+    - name: Set the heap size
+      ansible.builtin.copy:
+        dest: "{{ test_es_conf }}/jvm.options.d/molecule.options"
+        owner: root
+        group: elasticsearch
+        mode: "0640"
+        content: |
+          -Xms1g
+          -Xmx1g
+
+    # The auto-configured keystore holds passwords for keystores that no longer
+    # exist, so start from an empty one. Each token is printed as
+    # "SERVICE_TOKEN elastic/<account>/molecule = <value>" and kept with the
+    # test certificates.
+    - name: Create the keystore, the superuser and the service tokens
+      ansible.builtin.shell:
+        cmd: |
+          set -euo pipefail
+          rm -f "$CONF/elasticsearch.keystore"
+          "$BIN/elasticsearch-keystore" create --silent
+          "$BIN/elasticsearch-users" useradd "$ADMIN_USER" -p "$ADMIN_PASSWORD" -r superuser
+          for account in kibana fleet-server; do
+            "$BIN/elasticsearch-service-tokens" create "elastic/$account" molecule \
+              | sed -n 's/^SERVICE_TOKEN .* = //p' > "/root/molecule-pki/${account//-/_}_service_token"
+            test -s "/root/molecule-pki/${account//-/_}_service_token"
+          done
+        creates: /root/molecule-pki/fleet_server_service_token
+        executable: /bin/bash
+      environment:
+        CONF: "{{ test_es_conf }}"
+        BIN: "{{ test_es_bin }}"
+        ADMIN_USER: "{{ test_admin_user }}"
+        ADMIN_PASSWORD: "{{ test_admin_password }}"
+
+    - name: Copy the Fleet Server service token to the controller
+      ansible.builtin.fetch:
+        src: /root/molecule-pki/fleet_server_service_token
+        dest: "{{ test_pki_dir }}/fleet_service_token"
+        flat: true
+
+    - name: Let Elasticsearch read the keystore and the file realm
+      ansible.builtin.file:
+        path: "{{ test_es_conf }}/{{ item }}"
+        owner: root
+        group: elasticsearch
+        mode: "0660"
+      loop: [elasticsearch.keystore, users, users_roles, service_tokens]
+
+    - name: Start Elasticsearch
+      ansible.builtin.systemd_service:
+        name: elasticsearch
+        state: started
+        enabled: true
+
+    - name: Wait for the cluster
+      ansible.builtin.uri:
+        url: https://localhost:9200/_cluster/health?wait_for_status=yellow&timeout=30s
+        url_username: "{{ test_admin_user }}"
+        url_password: "{{ test_admin_password }}"
+        force_basic_auth: true
+        ca_path: /root/molecule-pki/ca.crt
+      register: test_health
+      until: test_health.status == 200
+      retries: 30
+      delay: 5
+
+    # Superuser privileges; the upgrade scenario manages Fleet with it.
+    - name: Create an API key for Kibana
+      ansible.builtin.uri:
+        url: https://localhost:9200/_security/api_key
+        method: POST
+        url_username: "{{ test_admin_user }}"
+        url_password: "{{ test_admin_password }}"
+        force_basic_auth: true
+        ca_path: /root/molecule-pki/ca.crt
+        body_format: json
+        body:
+          name: molecule-fleet
+      register: test_api_key
+
+    - name: Keep the API key with the test certificates
+      ansible.builtin.copy:
+        content: "{{ test_api_key.json.encoded }}"
+        dest: "{{ test_pki_dir }}/kibana_api_key"
+        mode: "0600"
+      delegate_to: localhost
+
+- name: Configure and start Kibana
+  hosts: kibana
+  gather_facts: false
+  vars:
+    test_kb_conf: /etc/kibana
+  tasks:
+    - name: Create the certificate directory
+      ansible.builtin.file:
+        path: "{{ test_kb_conf }}/molecule-certs"
+        state: directory
+        owner: root
+        group: kibana
+        mode: "0750"
+
+    - name: Install the server certificate, key and CA
+      ansible.builtin.copy:
+        src: "/root/molecule-pki/{{ item.src }}"
+        dest: "{{ test_kb_conf }}/molecule-certs/{{ item.dest }}"
+        remote_src: true
+        owner: root
+        group: kibana
+        mode: "0640"
+      loop:
+        - {src: "{{ inventory_hostname }}.crt", dest: kibana.crt}
+        - {src: "{{ inventory_hostname }}.key", dest: kibana.key}
+        - {src: ca.crt, dest: ca.crt}
+
+    - name: Read the Kibana service token
+      ansible.builtin.slurp:
+        src: /root/molecule-pki/kibana_service_token
+      register: test_kibana_token
+
+    # Fleet needs xpack.encryptedSavedObjects.encryptionKey.
+    - name: Configure Kibana
+      ansible.builtin.copy:
+        dest: "{{ test_kb_conf }}/kibana.yml"
+        owner: root
+        group: kibana
+        mode: "0660"
+        content: |
+          server.host: 0.0.0.0
+          server.name: {{ inventory_hostname }}
+          server.publicBaseUrl: https://{{ test_es_address }}:5601
+          server.ssl.enabled: true
+          server.ssl.certificate: {{ test_kb_conf }}/molecule-certs/kibana.crt
+          server.ssl.key: {{ test_kb_conf }}/molecule-certs/kibana.key
+          elasticsearch.hosts: [https://localhost:9200]
+          elasticsearch.serviceAccountToken: {{ test_kibana_token.content | b64decode | trim }}
+          elasticsearch.ssl.certificateAuthorities: [{{ test_kb_conf }}/molecule-certs/ca.crt]
+          xpack.security.encryptionKey: molecule-security-key-0123456789abcdef
+          xpack.encryptedSavedObjects.encryptionKey: molecule-saved-objects-key-0123456789abcdef
+          xpack.reporting.encryptionKey: molecule-reporting-key-0123456789abcdef
+          telemetry.optIn: false
+          logging.root.level: warn
+
+    - name: Set the heap size
+      ansible.builtin.lineinfile:
+        path: "{{ test_kb_conf }}/node.options"
+        line: --max-old-space-size=1024
+        create: true
+        owner: root
+        group: kibana
+        mode: "0660"
+
+    - name: Start Kibana
+      ansible.builtin.systemd_service:
+        name: kibana
+        state: started
+        enabled: true
+
+    - name: Wait for Kibana to report itself available
+      ansible.builtin.uri:
+        url: https://localhost:5601/api/status
+        url_username: "{{ test_admin_user }}"
+        url_password: "{{ test_admin_password }}"
+        force_basic_auth: true
+        ca_path: /root/molecule-pki/ca.crt
+        status_code: [200, 503]
+      register: test_status
+      until: >-
+        test_status.status == 200
+        and test_status.json.status.overall.level == 'available'
+      retries: 60
+      delay: 5

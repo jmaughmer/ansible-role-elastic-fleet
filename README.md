@@ -188,7 +188,7 @@ The facts only exist when the Fleet settings tasks ran in the same `ansible-play
 
 The role records a salted SHA-256 of the enrollment settings — the `enroll` arguments, the service token and the key passphrase — in `/etc/elastic-agent/.ansible-fleet-server-state.json`. A host is enrolled when that record and Elastic Agent's own `/etc/elastic-agent/fleet.enc` both exist.
 
-When the settings change (another URL, policy or token) a running Fleet Server is re-enrolled with `--force` in its batch. Re-enrolling gives the agent a **new id in Fleet**; the old one shows as offline until you remove it (or Fleet's inactivity timeout does). Set `elastic_fleet_reenroll_on_change: false` to be told instead.
+When the settings change (another URL, policy or token) a running Fleet Server is stopped, re-enrolled with `--force` and started again, in its batch. Re-enrolling gives the agent a **new id in Fleet**; the old one shows as offline until you remove it (or Fleet's inactivity timeout does). Set `elastic_fleet_reenroll_on_change: false` to be told instead.
 
 An agent that was enrolled by hand, or as an ordinary agent, has no record, so the role enrolls it as a Fleet Server on the first run.
 
@@ -269,6 +269,73 @@ Downloads run as async jobs that survive a dropped SSH session, and every task t
 
 Useful tags: `elastic_fleet_install`, `elastic_fleet_tls`, `elastic_fleet_settings`, `elastic_fleet_enroll`, `elastic_fleet_service`. Fact gathering and preflight always run.
 
+## Testing
+
+[`molecule/default/`](molecule/default/) runs the role against three systemd containers on one
+container network: `kes-1`, a single Elasticsearch node and Kibana at the role's default
+`elastic_fleet_version`, and two Fleet Servers, `fs-1` and `fs-2`. [`prepare.yml`](molecule/default/prepare.yml)
+makes a test CA and a certificate for every host, starts Elasticsearch with TLS on HTTP and Kibana
+with TLS, and creates service account tokens for `elastic/kibana` and `elastic/fleet-server`. `fs-1`
+takes its certificates as files on the host, as ansible-role-elastic-tls leaves them; `fs-2` takes
+them inline with an encrypted key and its passphrase. Fleet is managed with the default output and
+two agent policies, one with every per-policy setting changed. The sequence is:
+
+1. **converge**, then **idempotence**: a second converge must change nothing;
+2. **side effect** ([`side_effect.yml`](molecule/default/side_effect.yml)):
+   - an enrollment setting changes with `elastic_fleet_reenroll_on_change: false`: nothing is
+     re-enrolled or restarted;
+   - the same change with re-enrollment: both Fleet Servers get a new agent id, one per batch,
+     and the new settings are recorded;
+   - the converge settings again: both are re-enrolled back;
+   - `elastic_fleet_force_restart` restarts both, one per batch, keeping their agent ids;
+3. **verify** ([`verify.yml`](molecule/default/verify.yml)):
+   - Elastic Agent is running and enabled at the default version, and its repository is disabled;
+   - the TLS material, service token and enrollment record have their owners and modes, the key is
+     encrypted and has a passphrase file exactly when it has a passphrase, and no secret is in the
+     enrollment record or on a command line;
+   - every Fleet Server reports `HEALTHY` through its own URL and every URL agents are given,
+     checked against the test CA;
+   - each host's agent is online in Fleet;
+   - the Fleet Server policy, the agent policies, the Fleet Server host and the output are what
+     the inventory asks for;
+   - every host publishes the enrollment URLs and one active token per agent policy, with the
+     token's name.
+
+There is no check-mode step: the role's Fleet API calls are skipped in check mode.
+
+Other scenarios:
+
+| Scenario | What it covers |
+|---|---|
+| `upgrade` | Two Fleet Servers at an older 9.x release are upgraded to the default version one at a time: the second stops only once the first is back. Going back to the older release is refused. Fleet is managed with an API key instead of a password. |
+| `preflight` | Settings preflight must refuse, each in its own check, without printing a secret. These include an unsupported distribution, a host outside `elastic_fleet_group`, an inexact or 8.x version, a bad package source or Satellite override, http or missing URLs, an unknown client authentication, a bad port or batch size, missing Elasticsearch hosts, service token or Kibana credentials, malformed agent policies, Fleet settings that differ between hosts, and missing TLS material. Nothing is installed. |
+| `docker` | The default scenario on Docker instead of Podman. |
+
+```bash
+pip install -r molecule/requirements.txt
+```
+
+```bash
+for s in default upgrade preflight; do molecule test -s "$s" || break; done
+```
+
+The scenarios use Podman (rootless works), except `docker`, which needs Docker. They download
+Elasticsearch, Kibana and Elastic Agent from Elastic's repository, and Kibana downloads the Fleet
+Server and System integrations from the Elastic Package Registry. Elasticsearch, Kibana and two
+Fleet Servers need about 5 GB of memory. `MOLECULE_DISTRO` picks the image (default
+`rockylinux9`; also `rockylinux10`):
+
+```bash
+MOLECULE_DISTRO=rockylinux10 molecule test -s preflight
+```
+
+Lint with `yamllint .` and `ansible-lint` (configured by [`.yamllint`](.yamllint) and
+[`.ansible-lint`](.ansible-lint)). The tests run locally; there is no CI workflow.
+
+Not covered by containers: firewalld rules, FIPS mode, fapolicyd and Satellite repositories.
+These need virtual machines with firewalld running, FIPS or fapolicyd enabled, or a Satellite
+registration.
+
 ## Role layout
 
 ```
@@ -294,7 +361,8 @@ Useful tags: `elastic_fleet_install`, `elastic_fleet_tls`, `elastic_fleet_settin
 │   ├── rolling_restart.yml     # batches of upgrades, re-enrollments, restarts
 │   ├── restart_batch.yml
 │   └── wait_ready.yml          # /api/status must be HEALTHY
-└── examples/
+├── examples/
+└── molecule/                   # default, upgrade, preflight (Podman) and docker scenarios
 ```
 
 ## Related roles

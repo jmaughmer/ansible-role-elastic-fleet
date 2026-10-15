@@ -1,0 +1,30 @@
+---
+# Shared by every case in converge.yml
+test_role: "{{ lookup('env', 'MOLECULE_PROJECT_DIRECTORY') }}"
+test_first: "{{ groups['fleet_server'][0] }}"
+
+# Valid settings; each case changes some of them (case.yml).
+test_version: "{{ (lookup('ansible.builtin.file', test_role ~ '/defaults/main.yml') | from_yaml).elastic_fleet_version }}"
+test_token: molecule-preflight-token-AAEAAWVsYXN0aWM
+test_password: molecule-preflight-password
+test_api_key: bW9sZWN1bGUtcHJlZmxpZ2h0LWFwaS1rZXk=
+# No failure may print one of these
+test_secrets:
+  - "{{ test_token }}"
+  - "{{ test_password }}"
+  - "{{ test_api_key }}"
+
+test_public_urls: ["https://fleet.example.com:8220"]
+test_agent_policies:
+  - id: agent-policy
+    name: Agent Policy
+
+# Preflight only checks that the files are named; nothing reads them.
+test_ssl_certificates:
+  - name: "{{ inventory_hostname }}"
+    certificate:
+      path: /etc/pki/molecule/fleet.crt
+    key:
+      path: /etc/pki/molecule/fleet.key
+    ca:
+      path: /etc/pki/molecule/ca.crt
