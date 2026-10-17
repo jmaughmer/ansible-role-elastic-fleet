@@ -8,10 +8,14 @@
   delay: "{{ elastic_fleet_task_delay }}"
   when: ansible_facts['os_family'] is not defined
 
+# dpkg-query prints the selection and state too: '<want> ok installed <version>'
+# for an installed package, 'deinstall ok config-files <version>' once removed.
 - name: Facts | Query installed Elastic Agent package version  # noqa: command-instead-of-module
   ansible.builtin.command:
-    cmd: rpm -q --queryformat '%{VERSION}' elastic-agent
-  register: _ef_rpm_query
+    cmd: >-
+      {{ "dpkg-query -W -f='${Status} ${Version}' elastic-agent" if ansible_facts['os_family'] == 'Debian'
+         else "rpm -q --queryformat '%{VERSION}' elastic-agent" }}
+  register: _ef_pkg_query
   changed_when: false
   failed_when: false
   check_mode: false
@@ -37,7 +41,11 @@
 
 - name: Facts | Set Fleet Server facts
   ansible.builtin.set_fact:
-    _ef_installed_version: "{{ (_ef_rpm_query.stdout | trim) if _ef_rpm_query.rc == 0 else '' }}"
+    _ef_installed_version: >-
+      {{ '' if _ef_pkg_query.rc != 0
+         else (_ef_pkg_query.stdout | trim) if ansible_facts['os_family'] != 'Debian'
+         else (_ef_pkg_query.stdout.split() | last) if ' ok installed ' in _ef_pkg_query.stdout
+         else '' }}
     _ef_is_running: "{{ (_ef_service_state.stdout | trim) == 'active' }}"
     _ef_target_version: "{{ elastic_fleet_version }}"
     _ef_status_url_fact: "{{ _ef_status_url }}"

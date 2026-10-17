@@ -4,10 +4,14 @@
     _ef_batch_upgrade: "{{ _ef_batch | map('extract', hostvars) | selectattr('_ef_version_changing') | map(attribute='inventory_hostname') | list }}"
     _ef_batch_reenroll: "{{ _ef_batch | map('extract', hostvars) | selectattr('_ef_rolling_reenroll') | map(attribute='inventory_hostname') | list }}"
     _ef_batch_restart: "{{ _ef_batch | difference(_ef_batch_reenroll) }}"
+    # Hosts in the batch that install with apt (Ubuntu)
+    _ef_batch_apt: >-
+      {{ _ef_batch | map('extract', hostvars) | selectattr('ansible_facts.os_family', 'equalto', 'Debian')
+         | map(attribute='inventory_hostname') | list }}
   block:
-    # Fleet cannot upgrade an agent installed from an RPM, so upgrades go
+    # Fleet cannot upgrade an agent installed from a package, so upgrades go
     # through the package manager here.
-    - name: Rolling | Upgrade Elastic Agent package
+    - name: Rolling | Upgrade Elastic Agent package (dnf)
       ansible.builtin.dnf:
         name: "elastic-agent-{{ hostvars[item]._ef_target_version }}"
         state: present
@@ -15,13 +19,37 @@
         lock_timeout: "{{ elastic_fleet_dnf_lock_timeout }}"
         enablerepo: "{{ _ef_package_repos if _ef_package_repos | length > 0 else omit }}"
       delegate_to: "{{ item }}"
-      loop: "{{ _ef_batch_upgrade }}"
+      loop: "{{ _ef_batch_upgrade | reject('in', _ef_batch_apt) | list }}"
       async: "{{ 0 if ansible_check_mode else elastic_fleet_download_async_timeout }}"
       poll: "{{ elastic_fleet_download_async_poll }}"
       register: _ef_upgrade_package
       until: _ef_upgrade_package is not failed
       retries: "{{ elastic_fleet_task_retries }}"
       delay: "{{ elastic_fleet_task_delay }}"
+
+    - name: Rolling | Upgrade Elastic Agent package (apt)
+      ansible.builtin.apt:
+        name: "elastic-agent={{ hostvars[item]._ef_target_version }}"
+        state: present
+        allow_change_held_packages: true
+        allow_downgrade: false
+        cache_valid_time: 3600
+        lock_timeout: "{{ elastic_fleet_dnf_lock_timeout }}"
+      delegate_to: "{{ item }}"
+      loop: "{{ _ef_batch_upgrade | select('in', _ef_batch_apt) | list }}"
+      async: "{{ 0 if ansible_check_mode else elastic_fleet_download_async_timeout }}"
+      poll: "{{ elastic_fleet_download_async_poll }}"
+      register: _ef_upgrade_package_apt
+      until: _ef_upgrade_package_apt is not failed
+      retries: "{{ elastic_fleet_task_retries }}"
+      delay: "{{ elastic_fleet_task_delay }}"
+
+    - name: Rolling | Hold the upgraded Elastic Agent package
+      ansible.builtin.dpkg_selections:
+        name: elastic-agent
+        selection: hold
+      delegate_to: "{{ item }}"
+      loop: "{{ _ef_batch_upgrade | select('in', _ef_batch_apt) | list }}"
 
     # enroll_host.yml stops the agent, enrolls it and starts it again.
     - name: Rolling | Re-enroll Fleet Servers whose enrollment settings changed

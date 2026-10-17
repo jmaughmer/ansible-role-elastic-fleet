@@ -25,7 +25,9 @@
           - ansible_facts.services['elastic-agent.service'].status == 'enabled'
 
     - name: Read the installed version
-      ansible.builtin.command: rpm -q --queryformat '%{VERSION}' elastic-agent  # noqa: command-instead-of-module - reads one package's version
+      ansible.builtin.command: >-  # noqa: command-instead-of-module - reads one package's version
+        {{ "dpkg-query -W -f='${Version}' elastic-agent" if ansible_facts['os_family'] == 'Debian'
+           else "rpm -q --queryformat '%{VERSION}' elastic-agent" }}
       register: test_rpm
       changed_when: false
 
@@ -105,6 +107,15 @@
     - name: Check the repository is defined but disabled
       ansible.builtin.command: grep -qx 'enabled = 0' /etc/yum.repos.d/elastic-agent.repo
       changed_when: false
+      when: ansible_facts['os_family'] == 'RedHat'
+
+    # Held so a routine `apt upgrade` cannot upgrade Elastic Agent
+    - name: Check the package is held
+      ansible.builtin.command: dpkg-query -W -f='${Status}' elastic-agent
+      register: test_hold
+      changed_when: false
+      failed_when: test_hold.stdout is not match('hold ok installed')
+      when: ansible_facts['os_family'] == 'Debian'
 
     # Through each URL agents are given, and the host's own, checked against
     # the test CA: every certificate has to name every Fleet Server address.
