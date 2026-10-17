@@ -3,12 +3,14 @@
 # Platform
 # =============================================================================
 # Distributions accepted by preflight, as reported by ansible_facts['distribution'].
-# Major versions 9 and 10 are supported. Other Enterprise Linux rebuilds, such as
-# CentOS (Stream) or OracleLinux, can be added here but are not tested.
+# Enterprise Linux 9 and 10 and Ubuntu 24.04 and 26.04 are supported. Other
+# Enterprise Linux rebuilds, such as CentOS (Stream) or OracleLinux, can be added
+# here but are not tested.
 elastic_fleet_supported_distributions:
   - RedHat
   - AlmaLinux
   - Rocky
+  - Ubuntu
 
 # =============================================================================
 # Package / repository
@@ -19,17 +21,21 @@ elastic_fleet_supported_distributions:
 elastic_fleet_version: "9.5.4"
 
 # Where the elastic-agent package comes from:
-#   elastic   - Elastic's public repository, or a mirror of it. The role writes a
-#               disabled repository file and enables it only for its own dnf tasks.
+#   elastic   - Elastic's public repository, or a mirror of it. On Enterprise Linux
+#               the role writes a disabled repository file and enables it only for
+#               its own dnf tasks. On Ubuntu it adds an apt source and holds the
+#               package (apt-mark hold), so `apt upgrade` leaves it alone.
 #   satellite - a repository synced into Red Hat Satellite or Katello and delivered
 #               through subscription-manager (redhat.repo). Hosts must be registered
-#               and the repository must be in their content view.
+#               and the repository must be in their content view. Enterprise Linux only.
 #   none      - repositories are managed outside this role; packages come from
 #               whatever repositories are enabled on the host.
 elastic_fleet_repo_source: elastic
 
 # --- elastic_fleet_repo_source: elastic ---
-elastic_fleet_repo_baseurl: "https://artifacts.elastic.co/packages/{{ _ef_major_version }}.x/yum"
+# The yum repository on Enterprise Linux, the apt one (suite stable, component main) on Ubuntu.
+elastic_fleet_repo_baseurl: >-
+  https://artifacts.elastic.co/packages/{{ _ef_major_version }}.x/{{ 'apt' if ansible_facts['os_family'] == 'Debian' else 'yum' }}
 elastic_fleet_repo_gpgkey: "https://artifacts.elastic.co/GPG-KEY-elasticsearch"
 elastic_fleet_repo_gpgcheck: true
 

@@ -16,10 +16,30 @@
     state: enabled
   when: (_ef_firewalld_state.stdout | default('') | trim) == 'active'
 
-- name: Firewall | Report that firewalld is not running
+# Ubuntu's firewall. Rules are only added while ufw is active, as with firewalld.
+- name: Firewall | Check whether ufw is active
+  ansible.builtin.command:
+    cmd: ufw status
+  register: _ef_ufw_state
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when: (_ef_firewalld_state.stdout | default('') | trim) != 'active'
+
+- name: Firewall | Open the Fleet Server port in ufw
+  community.general.ufw:
+    rule: allow
+    port: "{{ elastic_fleet_port | string }}"
+    proto: tcp
+    comment: fleet-server
+  when: _ef_ufw_active | bool
+
+- name: Firewall | Report that no firewall is running
   ansible.builtin.debug:
     msg: >-
-      elastic_fleet_manage_firewall is on but firewalld is not running on {{ inventory_hostname }}, so no
-      rules were added. Port {{ elastic_fleet_port }}/tcp has to be reachable from every agent however this
-      host filters traffic.
-  when: (_ef_firewalld_state.stdout | default('') | trim) != 'active'
+      elastic_fleet_manage_firewall is on but neither firewalld nor ufw is running on {{ inventory_hostname }},
+      so no rules were added. Port {{ elastic_fleet_port }}/tcp has to be reachable from every agent however
+      this host filters traffic.
+  when:
+    - (_ef_firewalld_state.stdout | default('') | trim) != 'active'
+    - not (_ef_ufw_active | bool)

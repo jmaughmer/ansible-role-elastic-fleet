@@ -1,6 +1,6 @@
 # ansible-role-elastic-fleet
 
-An Ansible role that installs Elastic Agent 9.x from the RPM package and enrolls it as a self-managed **Fleet Server**, on RHEL, AlmaLinux and Rocky Linux 9 and 10.
+An Ansible role that installs Elastic Agent 9.x from Elastic's RPM or Debian package and enrolls it as a self-managed **Fleet Server**, on RHEL, AlmaLinux and Rocky Linux 9 and 10, and on Ubuntu 24.04 and 26.04.
 
 What it does:
 
@@ -13,25 +13,28 @@ What it does:
 
 ## Requirements
 
-- **Control node:** ansible-core 2.15 or later, plus the `ansible.posix` collection:
+- **Control node:** ansible-core 2.15 or later, plus the `ansible.posix` and `community.general` collections:
 
   ```bash
   ansible-galaxy collection install -r requirements.yml
   ```
 
-- **Target hosts:** RHEL, AlmaLinux or Rocky Linux 9 or 10, with `openssl` (installed by default).
+- **Target hosts:** RHEL, AlmaLinux or Rocky Linux 9 or 10, or Ubuntu 24.04 or 26.04, with `openssl` (installed by default).
 - **Elasticsearch and Kibana 9.x**, at least the version of Fleet Server, with security enabled and Kibana's `xpack.encryptedSavedObjects.encryptionKey` set (Fleet will not start without it).
 - **A service token** for the `elastic/fleet-server` service account, and Kibana credentials allowed to manage Fleet — see [Credentials](#credentials).
 
 ## Supported platforms
 
-| Distribution | `ansible_facts['distribution']` | Major versions |
+| Distribution | `ansible_facts['distribution']` | Versions |
 |---|---|---|
 | Red Hat Enterprise Linux | `RedHat` | 9, 10 |
 | AlmaLinux | `AlmaLinux` | 9, 10 |
 | Rocky Linux | `Rocky` | 9, 10 |
+| Ubuntu | `Ubuntu` | 24.04, 26.04 |
 
-Preflight stops the run on any other distribution or major version; add others to `elastic_fleet_supported_distributions` at your own risk.
+Elastic Agent comes from Elastic's RPM packages through dnf on Enterprise Linux, and from its Debian packages through apt on Ubuntu; everything else runs the same tasks on both. On Ubuntu the firewall is ufw, and Satellite is not available.
+
+Preflight stops the run on any other distribution or version; add others to `elastic_fleet_supported_distributions` at your own risk.
 
 ## Installation
 
@@ -50,6 +53,8 @@ roles:
 collections:
   - name: ansible.posix
     version: ">=1.5.0"
+  - name: community.general
+    version: ">=8.0.0"
   - name: community.crypto       # for elastic_tls
     version: ">=2.10.0"
 ```
@@ -194,25 +199,25 @@ An agent that was enrolled by hand, or as an ordinary agent, has no record, so t
 
 ## Upgrades
 
-Change `elastic_fleet_version`. Fleet cannot upgrade an agent installed from an RPM, so the role upgrades the package with dnf, a batch at a time, and waits for each batch to report healthy.
+Change `elastic_fleet_version`. Fleet cannot upgrade an agent installed from a package, so the role upgrades the package with dnf or apt, a batch at a time, and waits for each batch to report healthy.
 
 - **Order:** Elasticsearch, then Kibana, then Fleet Server, then the agents. Preflight refuses a Fleet Server newer than Elasticsearch or Kibana.
 - **Downgrades and major upgrades** are refused.
-- `dnf update` never upgrades Elastic Agent behind the role's back: the repository file is written disabled and enabled only for the role's own tasks (or set `elastic_fleet_satellite_repo_state: disabled` with Satellite).
+- `dnf update` never upgrades Elastic Agent behind the role's back: the repository file is written disabled and enabled only for the role's own tasks (or set `elastic_fleet_satellite_repo_state: disabled` with Satellite). On Ubuntu the package is held instead, so `apt upgrade` skips it; `apt-mark unhold elastic-agent` to upgrade it by hand.
 
 ## Package source
 
 | `elastic_fleet_repo_source` | Packages come from |
 |---|---|
-| `elastic` (default) | `elastic_fleet_repo_baseurl`, Elastic's public repository or a mirror of it |
-| `satellite` | `elastic_fleet_satellite_repo_id`, a repository delivered by Red Hat Satellite or Katello. The role checks it is in the host's content view, can set its enabled state and content overrides, and checks that the requested version has been promoted. |
+| `elastic` (default) | `elastic_fleet_repo_baseurl`, Elastic's public repository or a mirror of it: the yum repository on Enterprise Linux, the apt one on Ubuntu (key in `/etc/apt/keyrings/elastic.asc`, source in `/etc/apt/sources.list.d/elastic-9.x.sources`, shared with the other Elastic roles) |
+| `satellite` | Enterprise Linux only. `elastic_fleet_satellite_repo_id`, a repository delivered by Red Hat Satellite or Katello. The role checks it is in the host's content view, can set its enabled state and content overrides, and checks that the requested version has been promoted. |
 | `none` | Whatever the host has enabled |
 
 These work exactly as in [ansible-role-kibana](https://github.com/jmaughmer/ansible-role-kibana); the variables have the `elastic_fleet_` prefix.
 
 ## Firewall
 
-Port `elastic_fleet_port` (`8220/tcp`) is opened in `elastic_fleet_firewall_zone` when firewalld is running. Set `elastic_fleet_manage_firewall: false` to leave the firewall alone.
+Port `elastic_fleet_port` (`8220/tcp`) is opened in `elastic_fleet_firewall_zone` when firewalld is running, or allowed in ufw when ufw is active (Ubuntu). The role never starts or enables a firewall. Set `elastic_fleet_manage_firewall: false` to leave the firewall alone.
 
 Fleet Server also needs to reach Elasticsearch (9200) and agents need to reach Fleet Server and Elasticsearch; Kibana is only reached from the first Fleet Server host, during the run.
 
@@ -224,7 +229,7 @@ Downloads run as async jobs that survive a dropped SSH session, and every task t
 |---|---|---|
 | `elastic_fleet_task_retries`, `elastic_fleet_task_delay` | `3`, `15` | Retries for downloads and API calls |
 | `elastic_fleet_download_async_timeout`, `_poll` | `3600`, `15` | Package download time limit and poll interval |
-| `elastic_fleet_repo_timeout`, `elastic_fleet_repo_retries` | `120`, `10` | dnf per-request timeout and retries |
+| `elastic_fleet_repo_timeout`, `elastic_fleet_repo_retries` | `120`, `10` | dnf per-request timeout and retries (Enterprise Linux) |
 | `elastic_fleet_api_timeout` | `30` | Per-request HTTP timeout |
 | `elastic_fleet_enroll_timeout` | `600` | How long enroll waits for Fleet Server to start |
 | `elastic_fleet_ready_retries`, `elastic_fleet_ready_delay` | `60`, `5` | Waiting for `HEALTHY` |
@@ -344,13 +349,18 @@ KVM/libvirt (`qemu:///system`). Each VM has its own kernel, so SELinux is enforc
 as `vm.max_map_count` are the VM's own. Overrides for the VMs go in
 `molecule/kvm/inventory/group_vars/<group>/kvm.yml`.
 
+[`molecule/kvm-ubuntu2404/`](molecule/kvm-ubuntu2404/) and
+[`molecule/kvm-ubuntu2604/`](molecule/kvm-ubuntu2604/) run the same thing on Ubuntu 24.04 and 26.04
+VMs. They only swap the cloud image, and share `molecule/kvm/`'s playbooks and inventory.
+
 ```bash
-molecule test -s kvm
+for s in kvm kvm-ubuntu2404 kvm-ubuntu2604; do molecule test -s "$s" || break; done
 ```
 
 The machine running Molecule needs libvirt, `virt-install`, `qemu-img` and `xorriso`, and its user
-must be able to manage `qemu:///system`. The AlmaLinux 10 cloud image downloads once, checksum
-verified, to `/var/lib/libvirt/images/molecule`; each VM gets a throwaway disk on top of it.
+must be able to manage `qemu:///system`. Each cloud image downloads once, checksum verified, to
+`/var/lib/libvirt/images/molecule`; each VM gets a throwaway disk on top of it. VM names include the
+scenario, so the three scenarios can also run side by side if the machine has the memory.
 
 ## Role layout
 

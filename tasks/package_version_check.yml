@@ -3,13 +3,28 @@
 # pinned version exists in the package source before anything is changed; with
 # Satellite this catches content views that were not published or promoted.
 # For upgrades this runs well before any running Fleet Server is touched.
+# The index has to be current to list a version published since the last update.
+- name: Install | Update the apt package index
+  ansible.builtin.apt:
+    update_cache: true
+    lock_timeout: "{{ elastic_fleet_dnf_lock_timeout }}"
+  register: _ef_apt_index
+  until: _ef_apt_index is not failed
+  retries: "{{ elastic_fleet_task_retries }}"
+  delay: "{{ elastic_fleet_task_delay }}"
+  changed_when: false
+  check_mode: false
+  when: _ef_pkg_mgr == 'apt'
+
+# apt-cache madison prints 'elastic-agent | 9.5.4 | <source>' per version.
 - name: Install | Query available Elastic Agent versions
   ansible.builtin.command:
     argv: >-
-      {{ ['dnf', '-q', 'repoquery', '--qf', '%{version}']
-         + ((['--disablerepo=*'] + (_ef_package_repos | map('regex_replace', '^', '--enablerepo=') | list))
-            if _ef_package_repos | length > 0 else [])
-         + ['elastic-agent'] }}
+      {{ ['apt-cache', 'madison', 'elastic-agent'] if _ef_pkg_mgr == 'apt'
+         else ['dnf', '-q', 'repoquery', '--qf', '%{version}']
+              + ((['--disablerepo=*'] + (_ef_package_repos | map('regex_replace', '^', '--enablerepo=') | list))
+                 if _ef_package_repos | length > 0 else [])
+              + ['elastic-agent'] }}
   register: _ef_available_versions
   until: _ef_available_versions is not failed
   retries: "{{ elastic_fleet_task_retries }}"
@@ -20,7 +35,9 @@
 - name: Install | Verify the requested Elastic Agent version is available
   vars:
     _ef_versions: >-
-      {{ _ef_available_versions.stdout_lines | map('trim') | select('match', '^[0-9]') | unique | list }}
+      {{ _ef_available_versions.stdout_lines
+         | map('regex_replace', '^[^|]*[|]([^|]*)[|].*$', '\1')
+         | map('trim') | select('match', '^[0-9]') | unique | list }}
   ansible.builtin.assert:
     that:
       - elastic_fleet_version in _ef_versions
