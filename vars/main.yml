@@ -8,8 +8,16 @@ _ef_package_repos: >-
   {{ [_ef_repo_name] if elastic_fleet_repo_source == 'elastic'
      else ([elastic_fleet_satellite_repo_id] if elastic_fleet_repo_source == 'satellite' else []) }}
 _ef_python: "{{ ansible_facts['python']['executable'] | default('/usr/bin/python3') }}"
+# apt source on Ubuntu. The elasticsearch, kibana, logstash and elastic_fleet roles
+# write the same key and source, so a host running several of them ends up with one
+# definition (apt refuses two definitions of one URI with different keys).
+_ef_apt_keyring: /etc/apt/keyrings/elastic.asc
+_ef_apt_source: "/etc/apt/sources.list.d/elastic-{{ _ef_major_version }}.x.sources"
+# dnf on Enterprise Linux, apt on Ubuntu. A variable rather than a fact, because
+# ansible-role-elastic-agent runs repository.yml and install.yml without facts.yml.
+_ef_pkg_mgr: "{{ 'apt' if ansible_facts['os_family'] == 'Debian' else 'dnf' }}"
 
-# Written by elastic-agent once it is enrolled in Fleet (RPM layout).
+# Written by elastic-agent once it is enrolled in Fleet (RPM and Debian package layout).
 _ef_fleet_enc_file: "{{ elastic_fleet_agent_conf_dir }}/fleet.enc"
 # Fingerprint of the settings the agent was last enrolled with, root only.
 _ef_state_file: "{{ elastic_fleet_agent_conf_dir }}/.ansible-fleet-server-state.json"
@@ -92,3 +100,6 @@ _ef_kibana_headers: >-
 
 _ef_es_auth_headers:
   Authorization: "Bearer {{ elastic_fleet_service_token }}"
+
+# ufw (Ubuntu's firewall) is active
+_ef_ufw_active: "{{ (_ef_ufw_state.stdout | default('')) is search('^Status: active', multiline=True) }}"

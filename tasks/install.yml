@@ -14,7 +14,7 @@
 # The 9.x package installs the "basic" flavor, which lacks Fleet Server, unless
 # ELASTIC_AGENT_FLAVOR says otherwise on the first install. The flavor is then
 # kept in /var/lib/elastic-agent/.flavor for later upgrades.
-- name: Install | Install Elastic Agent package
+- name: Install | Install Elastic Agent package (dnf)
   ansible.builtin.dnf:
     name: "elastic-agent-{{ elastic_fleet_version }}"
     state: present
@@ -29,11 +29,45 @@
   until: _ef_package_install is not failed
   retries: "{{ elastic_fleet_task_retries }}"
   delay: "{{ elastic_fleet_task_delay }}"
-  when: >-
-    _ef_installed_version | length == 0
-    or (_ef_version_changing | bool and not (_ef_is_enrolled | bool))
+  when:
+    - _ef_pkg_mgr == 'dnf'
+    - >-
+      _ef_installed_version | length == 0
+      or (_ef_version_changing | bool and not (_ef_is_enrolled | bool))
+
+- name: Install | Install Elastic Agent package (apt)
+  ansible.builtin.apt:
+    name: "elastic-agent={{ elastic_fleet_version }}"
+    state: present
+    allow_change_held_packages: true
+    allow_downgrade: false
+    cache_valid_time: 3600
+    lock_timeout: "{{ elastic_fleet_dnf_lock_timeout }}"
+  environment:
+    ELASTIC_AGENT_FLAVOR: servers
+  async: "{{ 0 if ansible_check_mode else elastic_fleet_download_async_timeout }}"
+  poll: "{{ elastic_fleet_download_async_poll }}"
+  register: _ef_package_install_apt
+  until: _ef_package_install_apt is not failed
+  retries: "{{ elastic_fleet_task_retries }}"
+  delay: "{{ elastic_fleet_task_delay }}"
+  when:
+    - _ef_pkg_mgr == 'apt'
+    - >-
+      _ef_installed_version | length == 0
+      or (_ef_version_changing | bool and not (_ef_is_enrolled | bool))
+
+# The apt counterpart of the disabled dnf repository: `apt upgrade` skips a held
+# package, so only the role changes the version.
+- name: Install | Hold the Elastic Agent package
+  ansible.builtin.dpkg_selections:
+    name: elastic-agent
+    selection: hold
+  when:
+    - _ef_pkg_mgr == 'apt'
+    - not ansible_check_mode or _ef_installed_version | length > 0
 
 - name: Install | Record the installed version  # noqa: no-handler
   ansible.builtin.set_fact:
     _ef_version_changing: false
-  when: _ef_package_install is changed
+  when: _ef_package_install is changed or _ef_package_install_apt is changed

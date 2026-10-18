@@ -1,0 +1,43 @@
+---
+# Elastic's package repository for the test's own Elastic installs, enabled:
+# yum on Enterprise Linux, apt on Ubuntu (the same key and source file the
+# roles write, so the two never conflict).
+- name: Import the Elastic GPG key
+  ansible.builtin.rpm_key:
+    key: https://artifacts.elastic.co/GPG-KEY-elasticsearch
+    state: present
+  when: ansible_facts['os_family'] == 'RedHat'
+
+- name: Add the Elastic yum repository
+  ansible.builtin.yum_repository:
+    name: elasticsearch-molecule
+    description: Elastic packages (Molecule)
+    baseurl: "https://artifacts.elastic.co/packages/{{ test_default_version.split('.')[0] }}.x/yum"
+    gpgcheck: true
+    gpgkey: https://artifacts.elastic.co/GPG-KEY-elasticsearch
+    enabled: true
+  when: ansible_facts['os_family'] == 'RedHat'
+
+- name: Download the Elastic GPG key
+  ansible.builtin.get_url:
+    url: https://artifacts.elastic.co/GPG-KEY-elasticsearch
+    dest: /etc/apt/keyrings/elastic.asc
+    mode: "0644"
+  when: ansible_facts['os_family'] == 'Debian'
+
+- name: Add the Elastic apt source
+  ansible.builtin.copy:
+    dest: "/etc/apt/sources.list.d/elastic-{{ test_default_version.split('.')[0] }}.x.sources"
+    mode: "0644"
+    content: |
+      Types: deb
+      URIs: https://artifacts.elastic.co/packages/{{ test_default_version.split('.')[0] }}.x/apt
+      Suites: stable
+      Components: main
+      Signed-By: /etc/apt/keyrings/elastic.asc
+  when: ansible_facts['os_family'] == 'Debian'
+
+- name: Update the apt package index
+  ansible.builtin.apt:
+    update_cache: true
+  when: ansible_facts['os_family'] == 'Debian'

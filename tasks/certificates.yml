@@ -1,7 +1,8 @@
 ---
-# Elastic Agent installed from the RPM runs as root, so everything here is
-# root-only. Fleet Server reads these files by path; the paths are part of the
-# enrollment, the contents are not, so a renewed certificate only needs a restart.
+# Elastic Agent installed from the RPM or Debian package runs as root, so
+# everything here is root-only. Fleet Server reads these files by path; the
+# paths are part of the enrollment, the contents are not, so a renewed
+# certificate only needs a restart.
 - name: Certificates | Create TLS directory
   ansible.builtin.file:
     path: "{{ elastic_fleet_ssl_dir }}"
