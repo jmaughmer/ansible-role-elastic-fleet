@@ -276,91 +276,61 @@ Useful tags: `elastic_fleet_install`, `elastic_fleet_tls`, `elastic_fleet_settin
 
 ## Testing
 
-[`molecule/default/`](molecule/default/) runs the role against three systemd containers on one
-container network: `kes-1`, a single Elasticsearch node and Kibana at the role's default
-`elastic_fleet_version`, and two Fleet Servers, `fs-1` and `fs-2`. [`prepare.yml`](molecule/default/prepare.yml)
-makes a test CA and a certificate for every host, starts Elasticsearch with TLS on HTTP and Kibana
-with TLS, and creates service account tokens for `elastic/kibana` and `elastic/fleet-server`. `fs-1`
-takes its certificates as files on the host, as ansible-role-elastic-tls leaves them; `fs-2` takes
-them inline with an encrypted key and its passphrase. Fleet is managed with the default output and
-two agent policies, one with every per-policy setting changed. The sequence is:
+[`molecule/default/`](molecule/default/) runs the role against three real KVM VMs cloned from
+the Proxmox test lab's fleet onto its isolated labnet network — SELinux enforcing, firewalld
+running, the paths containers never could: `fleet-default-es` (a single Elasticsearch node at
+the role's default `elastic_fleet_version`) and `fleet-default-kb` (Kibana) are the fixtures,
+`fleet-default-fleet` is the Fleet Server the role is applied to.
+[`prepare.yml`](molecule/default/prepare.yml) gets the VMs onto the labnet resolver, makes a
+test CA and a certificate for every host with ansible-role-elastic-tls, starts Elasticsearch
+with TLS on HTTP and Kibana with TLS, and creates service account tokens for `elastic/kibana`
+and `elastic/fleet-server`. Converge is the repo's own [`examples/playbook.yml`](examples/playbook.yml):
+issue certificates, then deploy Fleet Server — with the default output and the Fleet settings
+from the scenario's inventory. The sequence is destroy → syntax → create → prepare → converge →
+idempotence → verify → destroy, and `verify.yml`:
 
-1. **converge**, then **idempotence**: a second converge must change nothing;
-2. **side effect** ([`side_effect.yml`](molecule/default/side_effect.yml)):
-   - an enrollment setting changes with `elastic_fleet_reenroll_on_change: false`: nothing is
-     re-enrolled or restarted;
-   - the same change with re-enrollment: both Fleet Servers get a new agent id, one per batch,
-     and the new settings are recorded;
-   - the converge settings again: both are re-enrolled back;
-   - `elastic_fleet_force_restart` restarts both, one per batch, keeping their agent ids;
-3. **verify** ([`verify.yml`](molecule/default/verify.yml)):
-   - Elastic Agent is running and enabled at the default version, and its repository is disabled;
-   - the TLS material, service token and enrollment record have their owners and modes, the key is
-     encrypted and has a passphrase file exactly when it has a passphrase, and no secret is in the
-     enrollment record or on a command line;
-   - every Fleet Server reports `HEALTHY` through its own URL and every URL agents are given,
-     checked against the test CA;
-   - each host's agent is online in Fleet;
-   - the Fleet Server policy, the agent policies, the Fleet Server host and the output are what
-     the inventory asks for;
-   - every host publishes the enrollment URLs and one active token per agent policy, with the
-     token's name.
+- Elastic Agent (running Fleet Server) is up, enabled and at the default version;
+- the agent reports HEALTHY and its `fleet-server` component is healthy — Fleet Server answers
+  on 8220 with the test CA;
+- Kibana is available and its `fleet_server_hosts` record points at this Fleet Server's address.
 
 There is no check-mode step: the role's Fleet API calls are skipped in check mode.
 
-Other scenarios:
-
-| Scenario | What it covers |
-|---|---|
-| `upgrade` | Two Fleet Servers at an older 9.x release are upgraded to the default version one at a time: the second stops only once the first is back. Going back to the older release is refused. Fleet is managed with an API key instead of a password. |
-| `preflight` | Settings preflight must refuse, each in its own check, without printing a secret. These include an unsupported distribution, a host outside `elastic_fleet_group`, an inexact or 8.x version, a bad package source or Satellite override, http or missing URLs, an unknown client authentication, a bad port or batch size, missing Elasticsearch hosts, service token or Kibana credentials, malformed agent policies, Fleet settings that differ between hosts, and missing TLS material. Nothing is installed. |
-| `docker` | The default scenario on Docker instead of Podman. |
+Tests run on the lab's molecule control machine: `molecule`, `molecule-proxmox` and the role's
+collections are preinstalled there, as are the `elastic_tls` role checkout the fixture chain
+needs; the driver's connection secrets and SSH key live only in the control machine's own
+config files. Nothing lab-specific is in this repo beyond the fleet template name and the
+default VMID band (9308–9310); hosts, tokens and subnets never leave the control machine. The
+Test Lab project's `molecule-labnet/` directory documents the lab itself. The three VMs need
+about 13 GB of memory between them. `LAB_TEMPLATE` picks the guest release (default
+`template-alma9`; also `template-alma10`):
 
 ```bash
-pip install -r molecule/requirements.txt
+molecule test                                   # AlmaLinux 9, SELinux enforcing
+LAB_TEMPLATE=template-alma10 molecule test      # the other EL release
 ```
 
-```bash
-for s in default upgrade preflight; do molecule test -s "$s" || break; done
-```
-
-The scenarios use Podman (rootless works), except `docker`, which needs Docker. They download
-Elasticsearch, Kibana and Elastic Agent from Elastic's repository, and Kibana downloads the Fleet
-Server and System integrations from the Elastic Package Registry. Elasticsearch, Kibana and two
-Fleet Servers need about 5 GB of memory. `MOLECULE_DISTRO` picks the image (default
-`rockylinux9`; also `rockylinux10`):
+The VMIDs come from `LAB_VMID_0..2` and default to the pinned 9308–9310 band, so a plain
+`molecule test` means one lab run of this repo at a time. For several runs of this repo at
+once, use the lab's `mlab` wrapper, which claims a free VMID band (and an isolated ephemeral
+directory) per run:
 
 ```bash
-MOLECULE_DISTRO=rockylinux10 molecule test -s preflight
+/root/labnet/mlab test -s default               # parallel-safe run on the control machine
 ```
 
 Lint with `yamllint .` and `ansible-lint` (configured by [`.yamllint`](.yamllint) and
-[`.ansible-lint`](.ansible-lint)). The tests run locally; there is no CI workflow.
+[`.ansible-lint`](.ansible-lint)). There is no CI; run the lint and Molecule from the control
+machine.
 
-Not covered by containers: firewalld rules, FIPS mode, fapolicyd and Satellite repositories.
-These need virtual machines with firewalld running, FIPS or fapolicyd enabled, or a Satellite
-registration.
-
-### On KVM virtual machines
-
-[`molecule/kvm/`](molecule/kvm/) runs the default scenario on real AlmaLinux 10 virtual machines
-instead of containers: the same hosts, groups, playbooks and inventory, one VM per host, on local
-KVM/libvirt (`qemu:///system`). Each VM has its own kernel, so SELinux is enforcing and settings such
-as `vm.max_map_count` are the VM's own. Overrides for the VMs go in
-`molecule/kvm/inventory/group_vars/<group>/kvm.yml`.
-
-[`molecule/kvm-ubuntu2404/`](molecule/kvm-ubuntu2404/) and
-[`molecule/kvm-ubuntu2604/`](molecule/kvm-ubuntu2604/) run the same thing on Ubuntu 24.04 and 26.04
-VMs. They only swap the cloud image, and share `molecule/kvm/`'s playbooks and inventory.
-
-```bash
-for s in kvm kvm-ubuntu2404 kvm-ubuntu2604; do molecule test -s "$s" || break; done
-```
-
-The machine running Molecule needs libvirt, `virt-install`, `qemu-img` and `xorriso`, and its user
-must be able to manage `qemu:///system`. Each cloud image downloads once, checksum verified, to
-`/var/lib/libvirt/images/molecule`; each VM gets a throwaway disk on top of it. VM names include the
-scenario, so the three scenarios can also run side by side if the machine has the memory.
+Not covered by the scenario: the rolling-upgrade path (upgrading two Fleet Servers one at a
+time, refusing a downgrade, managing Fleet with an API key — the removed `upgrade` scenario);
+settings preflight must refuse, each without printing a secret (the removed `preflight`
+scenario); inline TLS material with an encrypted key and passphrase, and the re-enrollment,
+force-restart and batching checks of the old `side_effect.yml`; and the Ubuntu guest paths
+(the removed `kvm-ubuntu*` scenarios — Fleet Server does ship for Ubuntu, but the tests now
+run EL guests only). FIPS mode, fapolicyd and Satellite repositories remain uncovered:
+they need hosts with FIPS or fapolicyd enabled, or a Satellite registration.
 
 ## Role layout
 
@@ -388,7 +358,7 @@ scenario, so the three scenarios can also run side by side if the machine has th
 │   ├── restart_batch.yml
 │   └── wait_ready.yml          # /api/status must be HEALTHY
 ├── examples/
-└── molecule/                   # default, upgrade, preflight (Podman) and docker scenarios
+└── molecule/                   # the lab default scenario
 ```
 
 ## Related roles

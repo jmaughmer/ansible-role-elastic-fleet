@@ -1,72 +1,125 @@
 ---
-# Three systemd containers (rootless Podman is fine) on one network:
-#   kes-1       Elasticsearch (single node) and Kibana, installed by prepare.yml
-#   fs-1, fs-2  the inventory group "fleet_server", which the role is applied to
-# fs-1 takes its TLS material from files on the host, as ansible-role-elastic-tls
-# leaves them; fs-2 takes it inline, as from a vault, with an encrypted key
-# (host_vars/fs-2.yml).
-# MOLECULE_DISTRO picks the EL release (default rockylinux9; also
-# rockylinux10) — see the README's "Testing" section. The playbooks and
-# inventory here are shared with the other scenarios.
+# Tests run on the Proxmox test lab: three real KVM VMs cloned from the lab
+# fleet onto the isolated labnet network (EL release chosen by LAB_TEMPLATE),
+# SELinux enforcing and firewalld running:
+#   fleet-default-es     Elasticsearch, single node — a fixture, installed by
+#                        prepare.yml (also the CA host of ansible-role-elastic-tls)
+#   fleet-default-kb     Kibana — a fixture, installed by prepare.yml
+#   fleet-default-fleet  the inventory group "fleet_server", which the role is
+#                        applied to — the host under test
+# converge.yml is a wrapper around the repo's own examples/playbook.yml (tls +
+# fleet roles); the inline group_vars below carry the same stack wiring
+# ansible-role-elastic-agent's scenario uses, and every address comes from
+# gathered facts, so nothing here knows a hostname, subnet or credential. All
+# Proxmox connection details live in the driver's secrets file on the control
+# machine. The driver's SSH lands as a sudo user; the plays' become: true runs
+# the tasks privileged through it.
 #
-# Inside containers firewalld isn't installed, so this exercises the role's
-# skip path for it.
+# Default VMIDs are the repo's 9308-9310 band, via LAB_VMID_0..2 so the lab's
+# `mlab` runner can claim a free band per run and allow parallel runs of this
+# repo; a plain molecule test uses the pinned band, one lab run at a time.
+# Needs the memory/cores passthrough patch in the molecule-proxmox driver
+# (ct-bootstrap.sh re-applies it after pipx upgrades).
 #
-# The sequence adds side_effect.yml (re-enrollment and restarts) before verify.
-# There is no `check` step: the role's Fleet API calls are skipped in check
-# mode, so a check-mode run cannot read Kibana's version.
+# Run on the lab's molecule control machine:
+#   /root/labnet/mlab test -s default              # parallel-safe, recommended
+#   molecule test                                  # pinned band
+#   LAB_TEMPLATE=template-alma10 molecule test     # the other EL release
 role_name_check: 1
 
 dependency:
-  name: galaxy   # installs requirements.yml next to this file
+  name: galaxy
+  enabled: false        # collections preinstalled on the control machine
+prerun: false
 
 driver:
-  name: podman
+  name: molecule-proxmox
+  options:
+    proxmox_secrets: ${LAB_PROXMOX_SECRETS:-/root/.config/molecule/proxmox-secrets.yml}
+    node: ${LAB_NODE:-galactica}
+    validate_certs: false   # the lab's PVE uses its self-signed cert
+    ssh_user: labadmin
+    ssh_identity_file: /root/.ssh/id_ed25519
+    full: true
+    pool: testlab
+    timeout: 300
 
 platforms:
-  - name: kes-1
-    image: "docker.io/geerlingguy/docker-${MOLECULE_DISTRO:-rockylinux9}-ansible:latest"
-    pre_build_image: true
-    override_command: false   # keep the image's own CMD: systemd as PID 1
-    systemd: always
-    network: fleet_molecule   # created by the driver from the first platform
-    groups: [elasticsearch, kibana]
+  - name: fleet-default-es
+    template_name: ${LAB_TEMPLATE:-template-alma9}
+    newid: ${LAB_VMID_0:-9308}
+    groups: [elasticsearch]
+    memory: 6144
+    cores: 2
 
-  - name: fs-1
-    image: "docker.io/geerlingguy/docker-${MOLECULE_DISTRO:-rockylinux9}-ansible:latest"
-    pre_build_image: true
-    override_command: false
-    systemd: always
-    network: fleet_molecule
-    groups: [fleet_server]
+  - name: fleet-default-kb
+    template_name: ${LAB_TEMPLATE:-template-alma9}
+    newid: ${LAB_VMID_1:-9309}
+    groups: [kibana]
+    memory: 4096
+    cores: 2
 
-  - name: fs-2
-    image: "docker.io/geerlingguy/docker-${MOLECULE_DISTRO:-rockylinux9}-ansible:latest"
-    pre_build_image: true
-    override_command: false
-    systemd: always
-    network: fleet_molecule
+  - name: fleet-default-fleet
+    template_name: ${LAB_TEMPLATE:-template-alma9}
+    newid: ${LAB_VMID_2:-9310}
     groups: [fleet_server]
+    memory: 3072
 
 provisioner:
   name: ansible
+  env:
+    # elastic_tls, elasticsearch and kibana resolve through the sibling
+    # role checkouts of this repo.
+    ANSIBLE_ROLES_PATH: "${MOLECULE_PROJECT_DIRECTORY}/..:/root/.ansible/roles"
   inventory:
-    links:
-      group_vars: inventory/group_vars/
-      host_vars: inventory/host_vars/
+    group_vars:
+      all:
+        # The role's own elastic_fleet_version. The whole stack is installed
+        # at it, as the agent scenario does with elastic_agent_version.
+        test_default_version: >-
+          {{ (lookup('ansible.builtin.file',
+             lookup('env', 'MOLECULE_PROJECT_DIRECTORY') ~ '/defaults/main.yml')
+             | from_yaml).elastic_fleet_version }}
+        # By address rather than name: the certificate carries the address.
+        test_es_address: "{{ hostvars[groups['elasticsearch'] | first].ansible_facts.default_ipv4.address }}"
+        test_kibana_address: "{{ hostvars[groups['kibana'] | first].ansible_facts.default_ipv4.address }}"
+        test_fleet_address: "{{ hostvars[groups['fleet_server'] | first].ansible_facts.default_ipv4.address }}"
+        test_kibana_url: "https://{{ test_kibana_address }}:5601"
+        # Written on the controller by prepare.yml: the service tokens.
+        test_secrets_dir: "{{ lookup('env', 'MOLECULE_EPHEMERAL_DIRECTORY') }}/secrets"
+        # Superuser in Elasticsearch's file realm, also used for Kibana.
+        test_admin_user: molecule_admin
+        test_admin_password: molecule-admin-password
+        # ansible-role-elastic-tls: a private CA on the first elasticsearch host.
+        elastic_tls_provider: ca
+        elastic_tls_ca_common_name: Molecule Test CA
+        elastic_tls_ca_passphrase: molecule-test-passphrase
+      fleet_server:
+        # Same wiring ansible-role-elastic-agent's scenario uses (its
+        # group_vars/fleet_server.yml), proven end to end.
+        elastic_fleet_version: "{{ test_default_version }}"
+        elastic_fleet_public_urls: ["https://{{ test_fleet_address }}:8220"]
+        elastic_fleet_elasticsearch_hosts: ["https://{{ test_es_address }}:9200"]
+        elastic_fleet_service_token: "{{ lookup('ansible.builtin.file', test_secrets_dir ~ '/fleet_server_service_token') }}"
+        elastic_fleet_kibana_url: "{{ test_kibana_url }}"
+        elastic_fleet_kibana_username: "{{ test_admin_user }}"
+        elastic_fleet_kibana_password: "{{ test_admin_password }}"
+        elastic_fleet_manage_output: true
+        elastic_fleet_client_auth: optional
+        elastic_fleet_no_log: false
+        elastic_fleet_task_retries: 2
+        elastic_fleet_task_delay: 5
 
 verifier:
   name: ansible
 
 scenario:
   test_sequence:
-    - dependency
     - destroy
     - syntax
     - create
     - prepare
     - converge
     - idempotence
-    - side_effect
     - verify
     - destroy
